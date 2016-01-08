@@ -1,8 +1,8 @@
-//===--- TypeSubstCloner.h - Clones code and substitutes types ---*- C++ -*-==//
+//===--- TypeSubstCloner.h - Clones code and substitutes types --*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -21,7 +21,7 @@
 #include "swift/AST/Type.h"
 #include "swift/SIL/SILCloner.h"
 #include "swift/SIL/DynamicCasts.h"
-#include "swift/SILPasses/Utils/Local.h"
+#include "swift/SILOptimizer/Utils/Local.h"
 #include "llvm/Support/Debug.h"
 
 namespace swift {
@@ -87,7 +87,7 @@ protected:
 
   ProtocolConformance *remapConformance(ArchetypeType *archetype,
                                         CanType type,
-                                        ProtocolConformance *conf) {
+                                        ProtocolConformanceRef conf) {
     Substitution sub(archetype, type, conf);
     return remapSubstitution(sub).getConformances()[0];
   }
@@ -206,8 +206,8 @@ protected:
     auto Conformance = sub.getConformances()[0];
 
     auto newLookupType = getOpASTType(Inst->getLookupType());
-    if (Conformance) {
-      CanType Ty = Conformance->getType()->getCanonicalType();
+    if (Conformance.isConcrete()) {
+      CanType Ty = Conformance.getConcrete()->getType()->getCanonicalType();
 
       if (Ty != newLookupType) {
         assert(Ty->isSuperclassOf(newLookupType, nullptr) &&
@@ -278,7 +278,7 @@ protected:
   TypeSubstitutionMap &SubsMap;
   /// The original function to specialize.
   SILFunction &Original;
-  /// The substiutions used at the call site.
+  /// The substitutions used at the call site.
   ArrayRef<Substitution> ApplySubs;
   /// True, if used for inlining.
   bool Inlining;

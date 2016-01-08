@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -30,9 +30,8 @@
 using namespace swift;
 using namespace Lowering;
 
-// FIXME: need to sit down and abstract away differences between
-// SGF::emitInjectOptionalInto(), SGF::emitInjectOptionalValueInto(),
-// SGF::getOptionalSomeValue(), and this function...
+// FIXME: With some changes to their callers, all of the below functions
+// could be re-worked to use emitInjectEnum().
 ManagedValue
 SILGenFunction::emitInjectOptional(SILLocation loc,
                                    ManagedValue v,
@@ -419,11 +418,11 @@ ManagedValue SILGenFunction::emitExistentialErasure(
                             CanType concreteFormalType,
                             const TypeLowering &concreteTL,
                             const TypeLowering &existentialTL,
-                            const ArrayRef<ProtocolConformance *> &conformances,
+                            ArrayRef<ProtocolConformanceRef> conformances,
                             SGFContext C,
                             llvm::function_ref<ManagedValue (SGFContext)> F) {
   // Mark the needed conformances as used.
-  for (auto *conformance : conformances)
+  for (auto conformance : conformances)
     SGM.useConformance(conformance);
 
   switch (existentialTL.getLoweredType().getObjectType()

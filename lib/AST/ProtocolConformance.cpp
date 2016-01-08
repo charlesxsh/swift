@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -28,6 +28,26 @@
 #include "llvm/Support/SaveAndRestore.h"
 
 using namespace swift;
+
+ProtocolConformanceRef::ProtocolConformanceRef(ProtocolDecl *protocol,
+                                               ProtocolConformance *conf) {
+  assert(protocol != nullptr &&
+         "cannot construct ProtocolConformanceRef with null protocol");
+  if (conf) {
+    assert(protocol == conf->getProtocol() && "protocol conformance mismatch");
+    Union = conf;
+  } else {
+    Union = protocol;
+  }
+}
+
+ProtocolDecl *ProtocolConformanceRef::getRequirement() const {
+  if (isConcrete()) {
+    return getConcrete()->getProtocol();
+  } else {
+    return getAbstract();
+  }
+}
 
 void *ProtocolConformance::operator new(size_t bytes, ASTContext &context,
                                         AllocationArena arena,
@@ -145,7 +165,7 @@ GenericParamList *ProtocolConformance::getGenericParams() const {
 
   case ProtocolConformanceKind::Specialized:
     // If we have a specialized protocol conformance, since we do not support
-    // currently partial specialization, we know that it can not have any open
+    // currently partial specialization, we know that it cannot have any open
     // type variables.
     return nullptr;
   }
@@ -174,7 +194,7 @@ GenericSignature *ProtocolConformance::getGenericSignature() const {
 
   case ProtocolConformanceKind::Specialized:
     // If we have a specialized protocol conformance, since we do not support
-    // currently partial specialization, we know that it can not have any open
+    // currently partial specialization, we know that it cannot have any open
     // type variables.
     return nullptr;
   }
@@ -328,7 +348,7 @@ SpecializedProtocolConformance::getTypeWitnessSubstAndDecl(
   }
 
   // Gather the conformances for the type witness. These should never fail.
-  SmallVector<ProtocolConformance *, 4> conformances;
+  SmallVector<ProtocolConformanceRef, 4> conformances;
   auto archetype = genericWitness.getArchetype();
   for (auto proto : archetype->getConformsTo()) {
     auto conforms = conformingModule->lookupConformance(specializedType, proto,
@@ -338,7 +358,7 @@ SpecializedProtocolConformance::getTypeWitnessSubstAndDecl(
             specializedType->isTypeParameter() ||
             specializedType->is<ErrorType>()) &&
            "Improperly checked substitution");
-    conformances.push_back(conforms.getPointer());
+    conformances.push_back(ProtocolConformanceRef(proto, conforms.getPointer()));
   }
 
   // Form the substitution.
@@ -642,7 +662,7 @@ DeclContext::getLocalProtocols(
     nullptr,
     diagnostics);
 
-  // Sort if requred.
+  // Sort if required.
   if (sorted) {
     llvm::array_pod_sort(result.begin(), result.end(),
                          &ProtocolType::compareProtocols);

@@ -2,14 +2,20 @@
 // RUN: %target-run %t.out
 // REQUIRES: executable_test
 
-// XFAIL: linux
-
 //
 // This file contains reflection tests that depend on hash values.
 // Don't add other tests here.
 //
 
 import StdlibUnittest
+
+// Also import modules which are used by StdlibUnittest internally. This
+// workaround is needed to link all required libraries in case we compile
+// StdlibUnittest with -sil-serialize-all.
+import SwiftPrivate
+#if _runtime(_ObjC)
+import ObjectiveC
+#endif
 
 var Reflection = TestSuite("Reflection")
 
@@ -30,7 +36,7 @@ Reflection.test("Dictionary") {
   var output = ""
   dump(dict, &output)
 
-#if arch(i386) || arch(arm)
+#if _runtime(_ObjC) && (arch(i386) || arch(arm))
   var expected = ""
   expected += "▿ 5 key/value pairs\n"
   expected += "  ▿ [0]: (2 elements)\n"
@@ -48,7 +54,7 @@ Reflection.test("Dictionary") {
   expected += "  ▿ [4]: (2 elements)\n"
   expected += "    - .0: Three\n"
   expected += "    - .1: 3\n"
-#elseif arch(x86_64) || arch(arm64)
+#elseif _runtime(_ObjC) && (arch(x86_64) || arch(arm64))
   var expected = ""
   expected += "▿ 5 key/value pairs\n"
   expected += "  ▿ [0]: (2 elements)\n"
@@ -66,8 +72,26 @@ Reflection.test("Dictionary") {
   expected += "  ▿ [4]: (2 elements)\n"
   expected += "    - .0: Four\n"
   expected += "    - .1: 4\n"
+#elseif !_runtime(_ObjC) && arch(x86_64)
+  var expected = ""
+  expected += "▿ 5 key/value pairs\n"
+  expected += "  ▿ [0]: (2 elements)\n"
+  expected += "    - .0: One\n"
+  expected += "    - .1: 1\n"
+  expected += "  ▿ [1]: (2 elements)\n"
+  expected += "    - .0: Five\n"
+  expected += "    - .1: 5\n"
+  expected += "  ▿ [2]: (2 elements)\n"
+  expected += "    - .0: Two\n"
+  expected += "    - .1: 2\n"
+  expected += "  ▿ [3]: (2 elements)\n"
+  expected += "    - .0: Four\n"
+  expected += "    - .1: 4\n"
+  expected += "  ▿ [4]: (2 elements)\n"
+  expected += "    - .0: Three\n"
+  expected += "    - .1: 3\n"
 #else
-  fatalError("unipmelemented")
+  fatalError("unimplemented")
 #endif
 
   expectEqual(expected, output)

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -18,6 +18,7 @@
 
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/Decl.h"
+#include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/AST/Substitution.h"
 #include "swift/AST/Type.h"
 #include "swift/AST/Types.h"
@@ -187,7 +188,9 @@ public:
   /// protocol conformance.
   ///
   /// The function object should accept a \c ValueDecl* for the requirement
-  /// followed by the \c ConcreteDeclRef for the witness.
+  /// followed by the \c ConcreteDeclRef for the witness. Note that a generic
+  /// witness will only be specialized if the conformance came from the current
+  /// file.
   template<typename F>
   void forEachValueWitness(LazyResolver *resolver, F f) const {
     const ProtocolDecl *protocol = getProtocol();
@@ -252,7 +255,7 @@ public:
     return mem;
   }
   
-  /// Print a parsable and human-readable description of the identifying
+  /// Print a parseable and human-readable description of the identifying
   /// information of the protocol conformance.
   void printName(raw_ostream &os,
                  const PrintOptions &PO = PrintOptions()) const;
@@ -376,6 +379,9 @@ public:
                       TypeDecl *typeDecl) const;
 
   /// Retrieve the value witness corresponding to the given requirement.
+  ///
+  /// Note that a generic witness will only be specialized if the conformance
+  /// came from the current file.
   ConcreteDeclRef getWitness(ValueDecl *requirement, 
                              LazyResolver *resolver) const;
 

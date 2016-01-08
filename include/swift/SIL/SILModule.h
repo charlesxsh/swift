@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift.org open source project
 //
-// Copyright (c) 2014 - 2015 Apple Inc. and the Swift project authors
+// Copyright (c) 2014 - 2016 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -45,7 +45,6 @@ namespace swift {
   class AnyFunctionType;
   class ASTContext;
   class FuncDecl;
-  class SILExternalSource;
   class SILTypeList;
   class SILUndef;
   class SourceFile;
@@ -166,15 +165,12 @@ private:
   /// This is lazily initialized the first time we attempt to
   /// deserialize. Previously this was created when the SILModule was
   /// constructed. In certain cases this was before all Modules had been loaded
-  /// causeing us to not
+  /// causing us to not
   std::unique_ptr<SerializedSILLoader> SILLoader;
   
   /// True if this SILModule really contains the whole module, i.e.
   /// optimizations can assume that they see the whole module.
   bool wholeModule;
-
-  /// The external SIL source to use when linking this module.
-  SILExternalSource *ExternalSource = nullptr;
 
   /// The options passed into this SILModule.
   SILOptions &Options;
@@ -389,24 +385,21 @@ public:
   ///
   /// \return false if the linking failed.
   bool linkFunction(SILFunction *Fun,
-                    LinkingMode LinkAll=LinkingMode::LinkNormal,
-                    std::function<void(SILFunction *)> Callback =nullptr);
+                    LinkingMode LinkAll = LinkingMode::LinkNormal);
 
   /// Attempt to link a function by declaration. Returns true if linking
   /// succeeded, false otherwise.
   ///
   /// \return false if the linking failed.
   bool linkFunction(SILDeclRef Decl,
-                    LinkingMode LinkAll=LinkingMode::LinkNormal,
-                    std::function<void(SILFunction *)> Callback =nullptr);
+                    LinkingMode LinkAll = LinkingMode::LinkNormal);
 
   /// Attempt to link a function by mangled name. Returns true if linking
   /// succeeded, false otherwise.
   ///
   /// \return false if the linking failed.
   bool linkFunction(StringRef Name,
-                    LinkingMode LinkAll=LinkingMode::LinkNormal,
-                    std::function<void(SILFunction *)> Callback =nullptr);
+                    LinkingMode LinkAll = LinkingMode::LinkNormal);
 
   /// Link in all Witness Tables in the module.
   void linkAllWitnessTables();
@@ -443,24 +436,42 @@ public:
                                    SILDeclRef constant,
                                    ForDefinition_t forDefinition);
 
+  /// \brief Return the declaration of a function, or create it if it does not
+  /// exist.
+  ///
+  /// This signature is a direct copy of the signature of SILFunction::create()
+  /// in order to simplify refactoring all SILFunction creation use-sites to use
+  /// SILModule. Eventually the uses should probably be refactored.
+  SILFunction *getOrCreateFunction(
+      SILLinkage linkage, StringRef name, CanSILFunctionType loweredType,
+      GenericParamList *contextGenericParams, Optional<SILLocation> loc,
+      IsBare_t isBareSILFunction, IsTransparent_t isTrans,
+      IsFragile_t isFragile, IsThunk_t isThunk = IsNotThunk,
+      SILFunction::ClassVisibility_t classVisibility = SILFunction::NotRelevant,
+      Inline_t inlineStrategy = InlineDefault,
+      EffectsKind EK = EffectsKind::Unspecified,
+      SILFunction *InsertBefore = nullptr,
+      const SILDebugScope *DebugScope = nullptr, DeclContext *DC = nullptr);
+
   /// Look up the SILWitnessTable representing the lowering of a protocol
   /// conformance, and collect the substitutions to apply to the referenced
   /// witnesses, if any.
   ///
   /// \arg C The protocol conformance mapped key to use to lookup the witness
   ///        table.
-  /// \arg deserializeLazily If we can not find the witness table should we
+  /// \arg deserializeLazily If we cannot find the witness table should we
   ///                        attempt to lazily deserialize it.
+  std::pair<SILWitnessTable *, ArrayRef<Substitution>>
+  lookUpWitnessTable(ProtocolConformanceRef C, bool deserializeLazily=true);
   std::pair<SILWitnessTable *, ArrayRef<Substitution>>
   lookUpWitnessTable(const ProtocolConformance *C, bool deserializeLazily=true);
 
   /// Attempt to lookup \p Member in the witness table for C.
   std::tuple<SILFunction *, SILWitnessTable *, ArrayRef<Substitution>>
-  lookUpFunctionInWitnessTable(const ProtocolConformance *C, SILDeclRef Member);
+  lookUpFunctionInWitnessTable(ProtocolConformanceRef C, SILDeclRef Member);
 
   /// Look up the VTable mapped to the given ClassDecl. Returns null on failure.
-  SILVTable *lookUpVTable(const ClassDecl *C,
-                          std::function<void(SILFunction *)> Callback = nullptr);
+  SILVTable *lookUpVTable(const ClassDecl *C);
 
   /// Attempt to lookup the function corresponding to \p Member in the class
   /// hierarchy of \p Class.
@@ -478,12 +489,6 @@ public:
   void setStage(SILStage s) {
     assert(s >= Stage && "regressing stage?!");
     Stage = s;
-  }
-
-  SILExternalSource *getExternalSource() const { return ExternalSource; }
-  void setExternalSource(SILExternalSource *S) {
-    assert(!ExternalSource && "External source already set");
-    ExternalSource = S;
   }
 
   /// \brief Run the SIL verifier to make sure that all Functions follow
@@ -514,12 +519,13 @@ public:
              bool PrintASTDecls = true) const;
 
   /// Allocate memory using the module's internal allocator.
-  void *allocate(unsigned Size, unsigned Align) const {
-    if (getASTContext().LangOpts.UseMalloc)
-      return AlignedAlloc(Size, Align);
+  void *allocate(unsigned Size, unsigned Align) const;
 
-    return BPA.Allocate(Size, Align);
-  }
+  /// Allocate memory for an instruction using the module's internal allocator.
+  void *allocateInst(unsigned Size, unsigned Align) const;
+
+  /// Deallocate memory of an instruction.
+  void deallocateInst(SILInstruction *I);
 
   /// \brief Looks up the llvm intrinsic ID and type for the builtin function.
   ///
