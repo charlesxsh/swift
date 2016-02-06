@@ -14,7 +14,9 @@
 #include "swift/SIL/Projection.h"
 #include "swift/Basic/NullablePtr.h"
 #include "swift/SIL/SILBuilder.h"
+#include "swift/SIL/InstructionUtils.h"
 #include "swift/SIL/DebugUtils.h"
+#include "swift/SIL/SILUndef.h"
 #include "llvm/ADT/None.h"
 #include "llvm/Support/Debug.h"
 
@@ -69,7 +71,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Struct, SEAI->getFieldNo());
     assert(getKind() == NewProjectionKind::Struct);
     assert(getIndex() == SEAI->getFieldNo());
-    assert(getType(SEAI->getOperand().getType(), SEAI->getModule()) ==
+    assert(getType(SEAI->getOperand()->getType(), SEAI->getModule()) ==
            SEAI->getType());
     break;
   }
@@ -78,7 +80,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Struct, SEI->getFieldNo());
     assert(getKind() == NewProjectionKind::Struct);
     assert(getIndex() == SEI->getFieldNo());
-    assert(getType(SEI->getOperand().getType(), SEI->getModule()) ==
+    assert(getType(SEI->getOperand()->getType(), SEI->getModule()) ==
            SEI->getType());
     break;
   }
@@ -87,8 +89,18 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Class, REAI->getFieldNo());
     assert(getKind() == NewProjectionKind::Class);
     assert(getIndex() == REAI->getFieldNo());
-    assert(getType(REAI->getOperand().getType(), REAI->getModule()) ==
+    assert(getType(REAI->getOperand()->getType(), REAI->getModule()) ==
            REAI->getType());
+    break;
+  }
+  case ValueKind::ProjectBoxInst: {
+    auto *PBI = cast<ProjectBoxInst>(I);
+    Value = ValueTy(NewProjectionKind::Box, (unsigned)0);
+    assert(getKind() == NewProjectionKind::Box);
+    assert(getIndex() == 0);
+    assert(getType(PBI->getOperand()->getType(), PBI->getModule()) ==
+           PBI->getType());
+    (void) PBI;
     break;
   }
   case ValueKind::TupleExtractInst: {
@@ -96,7 +108,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Tuple, TEI->getFieldNo());
     assert(getKind() == NewProjectionKind::Tuple);
     assert(getIndex() == TEI->getFieldNo());
-    assert(getType(TEI->getOperand().getType(), TEI->getModule()) ==
+    assert(getType(TEI->getOperand()->getType(), TEI->getModule()) ==
            TEI->getType());
     break;
   }
@@ -105,7 +117,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Tuple, TEAI->getFieldNo());
     assert(getKind() == NewProjectionKind::Tuple);
     assert(getIndex() == TEAI->getFieldNo());
-    assert(getType(TEAI->getOperand().getType(), TEAI->getModule()) ==
+    assert(getType(TEAI->getOperand()->getType(), TEAI->getModule()) ==
            TEAI->getType());
     break;
   }
@@ -114,7 +126,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Enum, UEDI->getElementNo());
     assert(getKind() == NewProjectionKind::Enum);
     assert(getIndex() == UEDI->getElementNo());
-    assert(getType(UEDI->getOperand().getType(), UEDI->getModule()) ==
+    assert(getType(UEDI->getOperand()->getType(), UEDI->getModule()) ==
            UEDI->getType());
     break;
   }
@@ -123,7 +135,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     Value = ValueTy(NewProjectionKind::Enum, UTEDAI->getElementNo());
     assert(getKind() == NewProjectionKind::Enum);
     assert(getIndex() == UTEDAI->getElementNo());
-    assert(getType(UTEDAI->getOperand().getType(), UTEDAI->getModule()) ==
+    assert(getType(UTEDAI->getOperand()->getType(), UTEDAI->getModule()) ==
            UTEDAI->getType());
     break;
   }
@@ -145,31 +157,31 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
     break;
   }
   case ValueKind::UpcastInst: {
-    auto *Ty = I->getType(0).getSwiftRValueType().getPointer();
+    auto *Ty = I->getType().getSwiftRValueType().getPointer();
     assert(Ty->isCanonical());
     Value = ValueTy(NewProjectionKind::Upcast, Ty);
     assert(getKind() == NewProjectionKind::Upcast);
-    assert(getType(I->getOperand(0).getType(), I->getModule()) ==
-           I->getType(0));
+    assert(getType(I->getOperand(0)->getType(), I->getModule()) ==
+           I->getType());
     break;
   }
   case ValueKind::UncheckedRefCastInst: {
-    auto *Ty = I->getType(0).getSwiftRValueType().getPointer();
+    auto *Ty = I->getType().getSwiftRValueType().getPointer();
     assert(Ty->isCanonical());
     Value = ValueTy(NewProjectionKind::RefCast, Ty);
     assert(getKind() == NewProjectionKind::RefCast);
-    assert(getType(I->getOperand(0).getType(), I->getModule()) ==
-           I->getType(0));
+    assert(getType(I->getOperand(0)->getType(), I->getModule()) ==
+           I->getType());
     break;
   }
   case ValueKind::UncheckedBitwiseCastInst:
   case ValueKind::UncheckedAddrCastInst: {
-    auto *Ty = I->getType(0).getSwiftRValueType().getPointer();
+    auto *Ty = I->getType().getSwiftRValueType().getPointer();
     assert(Ty->isCanonical());
     Value = ValueTy(NewProjectionKind::BitwiseCast, Ty);
     assert(getKind() == NewProjectionKind::BitwiseCast);
-    assert(getType(I->getOperand(0).getType(), I->getModule()) ==
-           I->getType(0));
+    assert(getType(I->getOperand(0)->getType(), I->getModule()) ==
+           I->getType());
     break;
   }
   }
@@ -178,7 +190,7 @@ NewProjection::NewProjection(SILInstruction *I) : Value() {
 NullablePtr<SILInstruction>
 NewProjection::createObjectProjection(SILBuilder &B, SILLocation Loc,
                                       SILValue Base) const {
-  SILType BaseTy = Base.getType();
+  SILType BaseTy = Base->getType();
 
   // We can only create a value projection from an object.
   if (!BaseTy.isObject())
@@ -198,6 +210,8 @@ NewProjection::createObjectProjection(SILBuilder &B, SILLocation Loc,
     return B.createUncheckedEnumData(Loc, Base, getEnumElementDecl(BaseTy));
   case NewProjectionKind::Class:
     return nullptr;
+  case NewProjectionKind::Box:
+    return nullptr;
   case NewProjectionKind::Upcast:
     return B.createUpcast(Loc, Base, getCastType(BaseTy));
   case NewProjectionKind::RefCast:
@@ -210,7 +224,7 @@ NewProjection::createObjectProjection(SILBuilder &B, SILLocation Loc,
 NullablePtr<SILInstruction>
 NewProjection::createAddressProjection(SILBuilder &B, SILLocation Loc,
                                        SILValue Base) const {
-  SILType BaseTy = Base.getType();
+  SILType BaseTy = Base->getType();
 
   // We can only create an address projection from an object, unless we have a
   // class.
@@ -237,6 +251,8 @@ NewProjection::createAddressProjection(SILBuilder &B, SILLocation Loc,
                                              getEnumElementDecl(BaseTy));
   case NewProjectionKind::Class:
     return B.createRefElementAddr(Loc, Base, getVarDecl(BaseTy));
+  case NewProjectionKind::Box:
+    return B.createProjectBox(Loc, Base);
   case NewProjectionKind::Upcast:
     return B.createUpcast(Loc, Base, getCastType(BaseTy));
   case NewProjectionKind::RefCast:
@@ -289,6 +305,19 @@ void NewProjection::getFirstLevelProjections(
     }
     return;
   }
+
+  if (auto Box = Ty.getAs<SILBoxType>()) {
+    NewProjection P(NewProjectionKind::Box, (unsigned)0);
+    DEBUG(NewProjectionPath X(Ty);
+          assert(X.getMostDerivedType(Mod) == Ty);
+          X.append(P);
+          assert(X.getMostDerivedType(Mod) == SILType::getPrimitiveAddressType(
+                                                Box->getBoxedType()));
+          X.verify(Mod););
+    (void) Box;
+    Out.push_back(P);
+    return;
+  }
 }
 
 //===----------------------------------------------------------------------===//
@@ -297,7 +326,7 @@ void NewProjection::getFirstLevelProjections(
 
 Optional<NewProjectionPath> NewProjectionPath::getProjectionPath(SILValue Start,
                                                                  SILValue End) {
-  NewProjectionPath P(Start.getType());
+  NewProjectionPath P(Start->getType(), End->getType());
 
   // If Start == End, there is a "trivial" projection path in between the
   // two. This is represented by returning an empty ProjectionPath.
@@ -306,26 +335,28 @@ Optional<NewProjectionPath> NewProjectionPath::getProjectionPath(SILValue Start,
 
   // Do not inspect the body of types with unreferenced types such as bitfields
   // and unions. This is currently only associated with structs.
-  if (Start.getType().aggregateHasUnreferenceableStorage() ||
-      End.getType().aggregateHasUnreferenceableStorage())
+  if (Start->getType().aggregateHasUnreferenceableStorage() ||
+      End->getType().aggregateHasUnreferenceableStorage())
     return llvm::NoneType::None;
 
   auto Iter = End;
-  bool NextAddrIsIndex = false;
   while (Start != Iter) {
     NewProjection AP(Iter);
     if (!AP.isValid())
       break;
     P.Path.push_back(AP);
-    NextAddrIsIndex = AP.getKind() == NewProjectionKind::Index;
     Iter = cast<SILInstruction>(*Iter).getOperand(0);
   }
 
   // Return None if we have an empty projection list or if Start == Iter.
-  // If the next project is index_addr, then Start and End actually point to
-  // disjoint locations (the value at Start has an implicit index_addr #0).
-  if (P.empty() || Start != Iter || NextAddrIsIndex)
+  // We do not worry about th implicit #0 in case of index_addr, as the
+  // NewProjectionPath never allow paths to be compared as a list of indices.
+  // Only the encoded type+index pair will be compared.
+  if (P.empty() || Start != Iter)
     return llvm::NoneType::None;
+
+  // Reverse to get a path from base to most-derived.
+  std::reverse(P.Path.begin(), P.Path.end());
 
   // Otherwise, return P.
   return std::move(P);
@@ -351,8 +382,8 @@ bool NewProjectionPath::hasNonEmptySymmetricDifference(
     return false;
 
   // Otherwise, we have a common base and perhaps some common subpath.
-  auto LHSReverseIter = Path.rbegin();
-  auto RHSReverseIter = RHS.Path.rbegin();
+  auto LHSIter = Path.begin();
+  auto RHSIter = RHS.Path.begin();
 
   bool FoundDifferingProjections = false;
 
@@ -360,8 +391,8 @@ bool NewProjectionPath::hasNonEmptySymmetricDifference(
   unsigned i = 0;
   for (unsigned e = std::min(size(), RHS.size()); i != e; ++i) {
     // Grab the current projections.
-    const NewProjection &LHSProj = *LHSReverseIter;
-    const NewProjection &RHSProj = *RHSReverseIter;
+    const NewProjection &LHSProj = *LHSIter;
+    const NewProjection &RHSProj = *RHSIter;
 
     // If we are accessing different fields of a common object, the two
     // projection paths may have a non-empty symmetric difference. We check if
@@ -372,8 +403,8 @@ bool NewProjectionPath::hasNonEmptySymmetricDifference(
     }
 
     // Continue if we are accessing the same field.
-    LHSReverseIter++;
-    RHSReverseIter++;
+    LHSIter++;
+    RHSIter++;
   }
 
   // All path elements are the same. The symmetric difference is empty.
@@ -384,14 +415,14 @@ bool NewProjectionPath::hasNonEmptySymmetricDifference(
   // casts in the symmetric difference. To be conservative, we only wish to
   // allow for casts to appear in the common parts of projections.
   for (unsigned li = i, e = size(); li != e; ++li) {
-    if (LHSReverseIter->isAliasingCast())
+    if (LHSIter->isAliasingCast())
       return false;
-    LHSReverseIter++;
+    LHSIter++;
   }
   for (unsigned ri = i, e = RHS.size(); ri != e; ++ri) {
-    if (RHSReverseIter->isAliasingCast())
+    if (RHSIter->isAliasingCast())
       return false;
-    RHSReverseIter++;
+    RHSIter++;
   }
 
   // If we don't have any casts in our symmetric difference (i.e. only typed
@@ -414,17 +445,16 @@ NewProjectionPath::computeSubSeqRelation(const NewProjectionPath &RHS) const {
   if (empty() || RHS.empty())
     return SubSeqRelation_t::Unknown;
 
-  // We reverse the projection path to scan from the common object.
-  auto LHSReverseIter = rbegin();
-  auto RHSReverseIter = RHS.rbegin();
+  auto LHSIter = begin();
+  auto RHSIter = RHS.begin();
 
   unsigned MinPathSize = std::min(size(), RHS.size());
 
   // For each index i until min path size...
   for (unsigned i = 0; i != MinPathSize; ++i) {
     // Grab the current projections.
-    const NewProjection &LHSProj = *LHSReverseIter;
-    const NewProjection &RHSProj = *RHSReverseIter;
+    const NewProjection &LHSProj = *LHSIter;
+    const NewProjection &RHSProj = *RHSIter;
 
     // If the two projections do not equal exactly, return Unrelated.
     //
@@ -438,8 +468,8 @@ NewProjectionPath::computeSubSeqRelation(const NewProjectionPath &RHS) const {
       return SubSeqRelation_t::Unknown;
 
     // Otherwise increment reverse iterators.
-    LHSReverseIter++;
-    RHSReverseIter++;
+    LHSIter++;
+    RHSIter++;
   }
 
   // Ok, we now know that one of the paths is a subsequence of the other. If
@@ -464,11 +494,11 @@ NewProjectionPath::computeSubSeqRelation(const NewProjectionPath &RHS) const {
 bool NewProjectionPath::findMatchingObjectProjectionPaths(
     SILInstruction *I, SmallVectorImpl<SILInstruction *> &T) const {
   // We only support unary instructions.
-  if (I->getNumOperands() != 1 || I->getNumTypes() != 1)
+  if (I->getNumOperands() != 1)
     return false;
 
   // Check that the base result type of I is equivalent to this types base path.
-  if (I->getOperand(0).getType().copyCategory(BaseType) != BaseType)
+  if (I->getOperand(0)->getType().copyCategory(BaseType) != BaseType)
     return false;
 
   // We maintain the head of our worklist so we can use our worklist as a queue
@@ -551,8 +581,8 @@ SILValue NewProjectionPath::createObjectProjections(SILBuilder &B,
                                                     SILLocation Loc,
                                                     SILValue Base) {
   assert(BaseType.isAddress());
-  assert(Base.getType().isObject());
-  assert(Base.getType().getAddressType() == BaseType);
+  assert(Base->getType().isObject());
+  assert(Base->getType().getAddressType() == BaseType);
   SILValue Val = Base;
   for (auto iter : Path) {
     Val = iter.createObjectProjection(B, Loc, Val).get();
@@ -588,6 +618,11 @@ raw_ostream &NewProjectionPath::print(raw_ostream &os, SILModule &M) {
       continue;
     }
 
+    if (IterProj.getKind() == NewProjectionKind::Box) {
+      os << "Box: ";
+      continue;
+    }
+
     llvm_unreachable("Can not print this projection kind");
   }
 
@@ -606,7 +641,7 @@ raw_ostream &NewProjectionPath::print(raw_ostream &os, SILModule &M) {
   return os;
 }
 
-raw_ostream &NewProjectionPath::printProjections(raw_ostream &os, SILModule &M) {
+raw_ostream &NewProjectionPath::printProjections(raw_ostream &os, SILModule &M) const {
   // Match how the memlocation print tests expect us to print projection paths.
   //
   // TODO: It sort of sucks having to print these bottom up computationally. We
@@ -635,7 +670,7 @@ void NewProjectionPath::dump(SILModule &M) {
   llvm::outs() << "\n";
 }
 
-void NewProjectionPath::dumpProjections(SILModule &M) {
+void NewProjectionPath::dumpProjections(SILModule &M) const {
   printProjections(llvm::outs(), M);
 }
 
@@ -648,79 +683,6 @@ void NewProjectionPath::verify(SILModule &M) {
     assert(IterTy);
   }
 #endif
-}
-
-void NewProjectionPath::expandTypeIntoLeafProjectionPaths(
-    SILType B, SILModule *Mod, llvm::SmallVectorImpl<NewProjectionPath> &Paths,
-    bool OnlyLeafNode) {
-  // Perform a BFS to expand the given type into projectionpath each of
-  // which contains 1 field from the type.
-  llvm::SmallVector<NewProjectionPath, 8> Worklist;
-  llvm::SmallVector<NewProjection, 8> Projections;
-
-  // Push an empty projection path to get started.
-  NewProjectionPath P(B);
-  Worklist.push_back(P);
-  do {
-    // Get the next level projections based on current projection's type.
-    NewProjectionPath PP = Worklist.pop_back_val();
-    // Get the current type to process.
-    SILType Ty = PP.getMostDerivedType(*Mod);
-
-    DEBUG(llvm::dbgs() << "Visiting type: " << Ty << "\n");
-
-    // Get the first level projection of the current type.
-    Projections.clear();
-    NewProjection::getFirstLevelProjections(Ty, *Mod, Projections);
-
-    // Reached the end of the projection tree, this field can not be expanded
-    // anymore.
-    if (Projections.empty()) {
-      DEBUG(llvm::dbgs() << "    No projections. Finished projection list\n");
-      Paths.push_back(PP);
-      continue;
-    }
-
-    // If this is a class type, we also have reached the end of the type
-    // tree for this type.
-    //
-    // We do not push its next level projection into the worklist,
-    // if we do that, we could run into an infinite loop, e.g.
-    //
-    //   class SelfLoop {
-    //     var p : SelfLoop
-    //   }
-    //
-    //   struct XYZ {
-    //     var x : Int
-    //     var y : SelfLoop
-    //   }
-    //
-    // The worklist would never be empty in this case !.
-    //
-    if (Ty.getClassOrBoundGenericClass()) {
-      DEBUG(llvm::dbgs() << "    Found class. Finished projection list\n");
-      Paths.push_back(PP);
-      continue;
-    }
-
-    // This is NOT a leaf node, keep the intermediate nodes as well.
-    if (!OnlyLeafNode) {
-      DEBUG(llvm::dbgs() << "    Found class. Finished projection list\n");
-      Paths.push_back(PP);
-    }
-
-    // Keep expanding the location.
-    for (auto &P : Projections) {
-      NewProjectionPath X(B);
-      X.append(PP);
-      assert(PP.getMostDerivedType(*Mod) == X.getMostDerivedType(*Mod));
-      X.append(P);
-      Worklist.push_back(X);
-    }
-
-    // Keep iterating if the worklist is not empty.
-  } while (!Worklist.empty());
 }
 
 //===----------------------------------------------------------------------===//
@@ -767,6 +729,9 @@ Projection::addressProjectionForInstruction(SILInstruction *I) {
   case ValueKind::RefElementAddrInst:
     assert(isAddrProjection(I) && "isAddrProjection out of sync");
     return Projection(cast<RefElementAddrInst>(I));
+  case ValueKind::ProjectBoxInst:
+    assert(isAddrProjection(I) && "isAddrProjection out of sync");
+    return Projection(cast<ProjectBoxInst>(I));
   case ValueKind::UncheckedTakeEnumDataAddrInst:
     assert(isAddrProjection(I) && "isAddrProjection out of sync");
     return Projection(cast<UncheckedTakeEnumDataAddrInst>(I));
@@ -851,6 +816,11 @@ Projection::Projection(RefElementAddrInst *REA)
       Index(getIndexForValueDecl(Decl)), Kind(unsigned(ProjectionKind::Class)) {
 }
 
+Projection::Projection(ProjectBoxInst *PBI)
+    : Type(PBI->getType()), Decl(nullptr),
+      Index(0), Kind(unsigned(ProjectionKind::Box)) {
+}
+
 /// UncheckedTakeEnumDataAddrInst always have an index of 0 since enums only
 /// have one payload.
 Projection::Projection(UncheckedTakeEnumDataAddrInst *UTEDAI)
@@ -876,7 +846,7 @@ NullablePtr<SILInstruction>
 Projection::
 createValueProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const {
   // Grab Base's type.
-  SILType BaseTy = Base.getType();
+  SILType BaseTy = Base->getType();
 
   // If BaseTy is not an object type, bail.
   if (!BaseTy.isObject())
@@ -897,6 +867,8 @@ createValueProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const {
                                      cast<EnumElementDecl>(getDecl()));
   case ProjectionKind::Class:
     return nullptr;
+  case ProjectionKind::Box:
+    return nullptr;
   }
 }
 
@@ -904,7 +876,7 @@ NullablePtr<SILInstruction>
 Projection::
 createAddrProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const {
   // Grab Base's type.
-  SILType BaseTy = Base.getType();
+  SILType BaseTy = Base->getType();
 
   // If BaseTy is not an address type, bail.
   if (!BaseTy.isAddress())
@@ -928,6 +900,8 @@ createAddrProjection(SILBuilder &B, SILLocation Loc, SILValue Base) const {
                                              cast<EnumElementDecl>(getDecl()));
   case ProjectionKind::Class:
     return B.createRefElementAddr(Loc, Base, cast<VarDecl>(getDecl()));
+  case ProjectionKind::Box:
+    return B.createProjectBox(Loc, Base);
   }
 }
 
@@ -952,7 +926,9 @@ SILValue Projection::getOperandForAggregate(SILInstruction *I) const {
       }
       break;
     case ProjectionKind::Class:
-      // There is no SIL instruction to create a class by aggregating values.
+    case ProjectionKind::Box:
+      // There is no SIL instruction to create a class or box by aggregating
+      // values.
       break;
   }
   return SILValue();
@@ -986,6 +962,13 @@ void Projection::getFirstLevelAddrProjections(
     }
     return;
   }
+
+  if (auto Box = Ty.getAs<SILBoxType>()) {
+    Out.push_back(Projection(ProjectionKind::Box,
+                    SILType::getPrimitiveAddressType(Box->getBoxedType()),
+                    nullptr, 0));
+    return;
+  }
 }
 
 void Projection::getFirstLevelProjections(
@@ -1013,11 +996,18 @@ void Projection::getFirstLevelProjections(
     }
     return;
   }
+
+  if (auto Box = Ty.getAs<SILBoxType>()) {
+    Out.push_back(Projection(ProjectionKind::Box,
+                    SILType::getPrimitiveObjectType(Box->getBoxedType()),
+                    nullptr, 0));
+    return;
+  }
 }
  
 void Projection::getFirstLevelProjections(
     SILValue V, SILModule &Mod, llvm::SmallVectorImpl<Projection> &Out) {
-  getFirstLevelProjections(V.getType(), Mod, Out);
+  getFirstLevelProjections(V->getType(), Mod, Out);
 }
 
 NullablePtr<SILInstruction>
@@ -1056,8 +1046,8 @@ ProjectionPath::getAddrProjectionPath(SILValue Start, SILValue End,
                                       bool IgnoreCasts) {
   // Do not inspect the body of structs with unreferenced types such as
   // bitfields and unions.
-  if (Start.getType().aggregateHasUnreferenceableStorage() ||
-      End.getType().aggregateHasUnreferenceableStorage()) {
+  if (Start->getType().aggregateHasUnreferenceableStorage() ||
+      End->getType().aggregateHasUnreferenceableStorage()) {
     return llvm::NoneType::None;
   }
 
@@ -1072,7 +1062,7 @@ ProjectionPath::getAddrProjectionPath(SILValue Start, SILValue End,
   // End is a projection at all.
   auto Iter = End;
   if (IgnoreCasts)
-    Iter = Iter.stripCasts();
+    Iter = stripCasts(Iter);
   bool NextAddrIsIndex = false;
   while (Projection::isAddrProjection(Iter) && Start != Iter) {
     Projection AP = *Projection::addressProjectionForValue(Iter);
@@ -1081,7 +1071,7 @@ ProjectionPath::getAddrProjectionPath(SILValue Start, SILValue End,
 
     Iter = cast<SILInstruction>(*Iter).getOperand(0);
     if (IgnoreCasts)
-      Iter = Iter.stripCasts();
+      Iter = stripCasts(Iter);
   }
 
   // Return None if we have an empty projection list or if Start == Iter.
@@ -1147,16 +1137,16 @@ computeSubSeqRelation(const ProjectionPath &RHS) const {
     return SubSeqRelation_t::Unknown;
 
   // We reverse the projection path to scan from the common object.
-  auto LHSReverseIter = rbegin();
-  auto RHSReverseIter = RHS.rbegin();
+  auto LHSIter = begin();
+  auto RHSIter = RHS.begin();
 
   unsigned MinPathSize = std::min(size(), RHS.size());
 
   // For each index i until min path size...
   for (unsigned i = 0; i != MinPathSize; ++i) {
     // Grab the current projections.
-    const Projection &LHSProj = *LHSReverseIter;
-    const Projection &RHSProj = *RHSReverseIter;
+    const Projection &LHSProj = *LHSIter;
+    const Projection &RHSProj = *RHSIter;
 
     // If the two projections do not equal exactly, return Unrelated.
     //
@@ -1170,8 +1160,8 @@ computeSubSeqRelation(const ProjectionPath &RHS) const {
       return SubSeqRelation_t::Unknown;
 
     // Otherwise increment reverse iterators.
-    LHSReverseIter++;
-    RHSReverseIter++;
+    LHSIter++;
+    RHSIter++;
   }
 
   // Ok, we now know that one of the paths is a subsequence of the other. If
@@ -1264,6 +1254,143 @@ ProjectionPath::subtractPaths(const ProjectionPath &LHS, const ProjectionPath &R
   }
 
   return P;
+}
+
+void
+NewProjectionPath::expandTypeIntoLeafProjectionPaths(SILType B, SILModule *Mod,
+                                                     NewProjectionPathList &Paths) {
+  // Perform a BFS to expand the given type into projectionpath each of
+  // which contains 1 field from the type.
+  llvm::SmallVector<NewProjectionPath, 8> Worklist;
+  llvm::SmallVector<NewProjection, 8> Projections;
+
+  // Push an empty projection path to get started.
+  NewProjectionPath P(B);
+  Worklist.push_back(P);
+  do {
+    // Get the next level projections based on current projection's type.
+    NewProjectionPath PP = Worklist.pop_back_val();
+    // Get the current type to process.
+    SILType Ty = PP.getMostDerivedType(*Mod);
+
+    DEBUG(llvm::dbgs() << "Visiting type: " << Ty << "\n");
+
+    // Get the first level projection of the current type.
+    Projections.clear();
+    NewProjection::getFirstLevelProjections(Ty, *Mod, Projections);
+
+    // Reached the end of the projection tree, this field can not be expanded
+    // anymore.
+    if (Projections.empty()) {
+      DEBUG(llvm::dbgs() << "    No projections. Finished projection list\n");
+      Paths.push_back(PP);
+      continue;
+    }
+
+    // If this is a class type, we also have reached the end of the type
+    // tree for this type.
+    //
+    // We do not push its next level projection into the worklist,
+    // if we do that, we could run into an infinite loop, e.g.
+    //
+    //   class SelfLoop {
+    //     var p : SelfLoop
+    //   }
+    //
+    //   struct XYZ {
+    //     var x : Int
+    //     var y : SelfLoop
+    //   }
+    //
+    // The worklist would never be empty in this case !.
+    //
+    if (Ty.getClassOrBoundGenericClass()) {
+      DEBUG(llvm::dbgs() << "    Found class. Finished projection list\n");
+      Paths.push_back(PP);
+      continue;
+    }
+
+    // Keep expanding the location.
+    for (auto &P : Projections) {
+      NewProjectionPath X(B);
+      X.append(PP);
+      ///assert(PP.getMostDerivedType(*Mod) == X.getMostDerivedType(*Mod));
+      X.append(P);
+      Worklist.push_back(X);
+    }
+    // Keep iterating if the worklist is not empty.
+  } while (!Worklist.empty());
+}
+
+void
+NewProjectionPath::expandTypeIntoNodeProjectionPaths(SILType B, SILModule *Mod,
+                                                     NewProjectionPathList &Paths) {
+  // Perform a BFS to expand the given type into projectionpath each of
+  // which contains 1 field from the type.
+  llvm::SmallVector<NewProjectionPath, 8> Worklist;
+  llvm::SmallVector<NewProjection, 8> Projections;
+
+  // Push an empty projection path to get started.
+  NewProjectionPath P(B);
+  Worklist.push_back(P);
+  do {
+    // Get the next level projections based on current projection's type.
+    NewProjectionPath PP = Worklist.pop_back_val();
+    // Get the current type to process.
+    SILType Ty = PP.getMostDerivedType(*Mod);
+
+    DEBUG(llvm::dbgs() << "Visiting type: " << Ty << "\n");
+
+    // Get the first level projection of the current type.
+    Projections.clear();
+    NewProjection::getFirstLevelProjections(Ty, *Mod, Projections);
+
+    // Reached the end of the projection tree, this field can not be expanded
+    // anymore.
+    if (Projections.empty()) {
+      DEBUG(llvm::dbgs() << "    No projections. Finished projection list\n");
+      Paths.push_back(PP);
+      continue;
+    }
+
+    // If this is a class type, we also have reached the end of the type
+    // tree for this type.
+    //
+    // We do not push its next level projection into the worklist,
+    // if we do that, we could run into an infinite loop, e.g.
+    //
+    //   class SelfLoop {
+    //     var p : SelfLoop
+    //   }
+    //
+    //   struct XYZ {
+    //     var x : Int
+    //     var y : SelfLoop
+    //   }
+    //
+    // The worklist would never be empty in this case !.
+    //
+    if (Ty.getClassOrBoundGenericClass()) {
+      DEBUG(llvm::dbgs() << "    Found class. Finished projection list\n");
+      Paths.push_back(PP);
+      continue;
+    }
+
+    // This is NOT a leaf node, keep the intermediate nodes as well.
+    DEBUG(llvm::dbgs() << "    Found class. Finished projection list\n");
+    Paths.push_back(PP);
+
+    // Keep expanding the location.
+    for (auto &P : Projections) {
+      NewProjectionPath X(B);
+      X.append(PP);
+      assert(PP.getMostDerivedType(*Mod) == X.getMostDerivedType(*Mod));
+      X.append(P);
+      Worklist.push_back(X);
+    }
+
+    // Keep iterating if the worklist is not empty.
+  } while (!Worklist.empty());
 }
 
 void
@@ -1476,7 +1603,7 @@ processUsersOfValue(ProjectionTree &Tree,
 
     DEBUG(llvm::dbgs() << "            Created projection.\n");
 
-    assert(User->getNumTypes() == 1 && "Projections should only have one use");
+    assert(User->hasValue() && "Projections should have a value");
 
     // Look up the Node for this projection add {User, ChildNode} to the
     // worklist.
@@ -1634,6 +1761,57 @@ ProjectionTree::~ProjectionTree() {
     N->~ProjectionTreeNode();
 }
 
+SILValue
+ProjectionTree::computeExplodedArgumentValueInner(SILBuilder &Builder,
+                                                  SILLocation Loc,
+                                                  ProjectionTreeNode *Node,
+                                                  LeafValueMapTy &LeafValues) {
+  // Use the child node value if the child is alive.
+  if (Node->ChildProjections.empty()) {
+    auto Iter = LeafValues.find(Node->getIndex());
+    if (Iter != LeafValues.end())
+      return Iter->second;
+    // Return undef for dead node.
+    return SILUndef::get(Node->getType(), Mod);
+  }
+
+  // This is an aggregate node, construct its value from its children
+  // recursively. 
+  //
+  // NOTE: We do not expect to have too many levels of nesting, so
+  // recursion should be fine.
+  llvm::SmallVector<SILValue, 8> ChildValues;
+  for (unsigned ChildIdx : Node->ChildProjections) {
+    ProjectionTreeNode *Child = getNode(ChildIdx);
+    ChildValues.push_back(computeExplodedArgumentValueInner(Builder, Loc, Child,
+                                                            LeafValues));
+  }
+
+  // Form and return the aggregate.
+  NullablePtr<swift::SILInstruction> AI =
+      Projection::createAggFromFirstLevelProjections(Builder, Loc,
+                                                     Node->getType(),
+                                                     ChildValues);
+
+  assert(AI.get() && "Failed to get a part of the debug value");
+  return SILValue(AI.get());
+}
+
+SILValue
+ProjectionTree::computeExplodedArgumentValue(SILBuilder &Builder, 
+                                             SILLocation Loc,
+                                             llvm::SmallVector<SILValue, 8> &LeafValues) {
+  // Construct the leaf index to leaf value map.
+  llvm::DenseMap<unsigned, SILValue> LeafIndexToValue;
+  for (unsigned i = 0; i < LeafValues.size(); ++i) {
+    LeafIndexToValue[LeafIndices[i]] = LeafValues[i];
+  }
+
+  // Compute the full root node debug node by walking down the projection tree.
+  return computeExplodedArgumentValueInner(Builder, Loc, getRoot(),
+                                           LeafIndexToValue);
+}
+
 void
 ProjectionTree::computeUsesAndLiveness(SILValue Base) {
   // Propagate liveness and users through the tree.
@@ -1734,7 +1912,7 @@ createTreeFromValue(SILBuilder &B, SILLocation Loc, SILValue NewBase,
     SILValue V = std::get<1>(Worklist.back());
     Worklist.pop_back();
 
-    DEBUG(llvm::dbgs() << "Visiting: " << V.getType() << ": " << V);
+    DEBUG(llvm::dbgs() << "Visiting: " << V->getType() << ": " << V);
 
     // If we have any children...
     unsigned NumChildren = Node->ChildProjections.size();
@@ -1746,7 +1924,7 @@ createTreeFromValue(SILBuilder &B, SILLocation Loc, SILValue NewBase,
       for (unsigned ChildIdx : reversed(Node->ChildProjections)) {
         const ProjectionTreeNode *ChildNode = getNode(ChildIdx);
         SILInstruction *I = ChildNode->createProjection(B, Loc, V).get();
-        DEBUG(llvm::dbgs() << "    Adding Child: " << I->getType(0) << ": " << *I);
+        DEBUG(llvm::dbgs() << "    Adding Child: " << I->getType() << ": " << *I);
         Worklist.push_back(std::make_tuple(ChildNode, SILValue(I)));
       }
     } else {
@@ -1790,7 +1968,7 @@ public:
   /// If all SILValues have been set, we are complete.
   bool isComplete() const {
     return std::all_of(Values.begin(), Values.end(), [](SILValue V) -> bool {
-      return V.getDef();
+      return V;
     });
   }
 

@@ -78,17 +78,15 @@ protected:
                             Original.getContextGenericParams(),
                             ApplySubs);
     // Remap opened archetypes into the cloned context.
-    newSub = Substitution(newSub.getArchetype(),
-                          getASTTypeInClonedContext(newSub.getReplacement()
+    newSub = Substitution(getASTTypeInClonedContext(newSub.getReplacement()
                                                       ->getCanonicalType()),
                           newSub.getConformances());
     return newSub;
   }
 
-  ProtocolConformance *remapConformance(ArchetypeType *archetype,
-                                        CanType type,
-                                        ProtocolConformanceRef conf) {
-    Substitution sub(archetype, type, conf);
+  ProtocolConformanceRef remapConformance(CanType type,
+                                          ProtocolConformanceRef conf) {
+    Substitution sub(type, conf);
     return remapSubstitution(sub).getConformances()[0];
   }
 
@@ -265,7 +263,7 @@ protected:
     // If the type substituted type of the operand type and result types match
     // there is no need for an upcast and we can just use the operand.
     if (getOpType(Upcast->getType()) ==
-        getOpValue(Upcast->getOperand()).getType()) {
+        getOpValue(Upcast->getOperand())->getType()) {
       ValueMap.insert({SILValue(Upcast), getOpValue(Upcast->getOperand())});
       return;
     }

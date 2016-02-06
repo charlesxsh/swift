@@ -1060,13 +1060,23 @@ bool ArchetypeBuilder::addAbstractTypeParamRequirements(
   // diagnosing it if this is the first such occurrence.
   auto markRecursive = [&](AssociatedTypeDecl *assocType,
                            ProtocolDecl *proto,
-                           SourceLoc loc ) {
+                           SourceLoc loc) {
     if (!pa->isRecursive() && !assocType->isRecursive()) {
       Diags.diagnose(assocType->getLoc(),
                      diag::recursive_requirement_reference);
-      assocType->setIsRecursive();
+        
+      // Mark all associatedtypes in this protocol as recursive (and error-type)
+      // to avoid later crashes dealing with this invalid protocol in other
+      // contexts.
+      auto containingProto = assocType->getDeclContext()->isProtocolOrProtocolExtensionContext();
+      for (auto member : containingProto->getMembers())
+        if (auto assocType = dyn_cast<AssociatedTypeDecl>(member))
+          assocType->setIsRecursive();
     }
     pa->setIsRecursive();
+
+    // Silence downstream errors referencing this associated type.
+    assocType->setInvalid();
 
     // FIXME: Drop this protocol.
     pa->addConformance(proto, RequirementSource(kind, loc), *this);
@@ -1159,7 +1169,7 @@ bool ArchetypeBuilder::visitInherited(
 
 bool ArchetypeBuilder::addRequirement(const RequirementRepr &Req) {
   switch (Req.getKind()) {
-  case RequirementKind::Conformance: {
+  case RequirementReprKind::TypeConstraint: {
     PotentialArchetype *PA = resolveArchetype(Req.getSubject());
     if (!PA) {
       // FIXME: Poor location information.
@@ -1199,14 +1209,11 @@ bool ArchetypeBuilder::addRequirement(const RequirementRepr &Req) {
     return false;
   }
 
-  case RequirementKind::SameType:
+  case RequirementReprKind::SameType:
     return addSameTypeRequirement(Req.getFirstType(), 
                                   Req.getSecondType(),
                                   RequirementSource(RequirementSource::Explicit,
                                                     Req.getEqualLoc()));
-
-  case RequirementKind::WitnessMarker:
-    llvm_unreachable("Value witness marker in requirement");
   }
 
   llvm_unreachable("Unhandled requirement?");
@@ -1215,14 +1222,18 @@ bool ArchetypeBuilder::addRequirement(const RequirementRepr &Req) {
 void ArchetypeBuilder::addRequirement(const Requirement &req, 
                                       RequirementSource source) {
   switch (req.getKind()) {
-  case RequirementKind::Conformance: {
+  case RequirementKind::Superclass: {
     PotentialArchetype *pa = resolveArchetype(req.getFirstType());
     assert(pa && "Re-introducing invalid requirement");
 
-    if (req.getSecondType()->getClassOrBoundGenericClass()) {
-      addSuperclassRequirement(pa, req.getSecondType(), source);
-      return;
-    }
+    assert(req.getSecondType()->getClassOrBoundGenericClass());
+    addSuperclassRequirement(pa, req.getSecondType(), source);
+    return;
+  }
+
+  case RequirementKind::Conformance: {
+    PotentialArchetype *pa = resolveArchetype(req.getFirstType());
+    assert(pa && "Re-introducing invalid requirement");
 
     SmallVector<ProtocolDecl *, 4> conformsTo;
     bool existential = req.getSecondType()->isExistentialType(conformsTo);
@@ -1338,6 +1349,7 @@ public:
         break;
       }
 
+      case RequirementKind::Superclass:
       case RequirementKind::Conformance: {
         auto subjectType = req.getFirstType().subst(
                              &Builder.getModule(),
@@ -1354,17 +1366,19 @@ public:
         if (isOuterArchetype(subjectPA))
           return Action::Continue;
 
-        if (auto proto = req.getSecondType()->getAs<ProtocolType>()) {
+        if (req.getKind() == RequirementKind::Conformance) {
+          auto proto = req.getSecondType()->castTo<ProtocolType>();
           if (Builder.addConformanceRequirement(subjectPA, proto->getDecl(),
                                                 source)) {
             HadError = true;
             return Action::Stop;
           }
-        } else if (Builder.addSuperclassRequirement(subjectPA, 
-                                                    req.getSecondType(),
-                                                    source)) {
-          HadError = true;
-          return Action::Stop;
+        } else {
+          if (Builder.addSuperclassRequirement(subjectPA, req.getSecondType(),
+                                               source)) {
+            HadError = true;
+            return Action::Stop;
+          }
         }
         break;
       }
@@ -1623,9 +1637,8 @@ void ArchetypeBuilder::enumerateRequirements(llvm::function_ref<
       RequirementSource(RequirementSource::Protocol, SourceLoc()));
 
     // If we have a superclass, produce a superclass requirement
-    // (FIXME: Currently described as a conformance requirement)
     if (Type superclass = archetype->getSuperclass()) {
-      f(RequirementKind::Conformance, archetype, superclass,
+      f(RequirementKind::Superclass, archetype, superclass,
         archetype->getSuperclassSource());
     }
 
@@ -1710,6 +1723,7 @@ void ArchetypeBuilder::dump(llvm::raw_ostream &out) {
                             RequirementSource source) {
     switch (kind) {
     case RequirementKind::Conformance:
+    case RequirementKind::Superclass:
       out << "\n  ";
       out << archetype->getDebugName() << " : " 
           << type.get<Type>().getString() << " [";
@@ -1800,6 +1814,31 @@ Type ArchetypeBuilder::mapTypeIntoContext(Module *M,
   });
 }
 
+Type
+ArchetypeBuilder::mapTypeOutOfContext(DeclContext *dc, Type type) {
+  GenericParamList *genericParams = dc->getGenericParamsOfContext();
+  return mapTypeOutOfContext(dc->getParentModule(), genericParams, type);
+}
+
+Type ArchetypeBuilder::mapTypeOutOfContext(ModuleDecl *M,
+                                           GenericParamList *genericParams,
+                                           Type type) {
+  // If the context is non-generic, we're done.
+  if (!genericParams)
+    return type;
+
+  // Capture the archetype -> interface type mapping.
+  TypeSubstitutionMap subs;
+  for (auto params = genericParams; params != nullptr;
+       params = params->getOuterParameters()) {
+    for (auto param : *params) {
+      subs[param->getArchetype()] = param->getDeclaredType();
+    }
+  }
+
+  return type.subst(M, subs, SubstFlags::AllowLoweredTypes);
+}
+
 bool ArchetypeBuilder::addGenericSignature(GenericSignature *sig,
                                            bool adoptArchetypes,
                                            bool treatRequirementsAsExplicit) {
@@ -1863,9 +1902,8 @@ addRequirements(
 
   // Add superclass requirement, if needed.
   if (auto superclass = pa->getSuperclass()) {
-    // FIXME: Distinguish superclass from conformance?
     // FIXME: What if the superclass type involves a type parameter?
-    requirements.push_back(Requirement(RequirementKind::Conformance,
+    requirements.push_back(Requirement(RequirementKind::Superclass,
                                        type, superclass));
   }
 

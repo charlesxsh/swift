@@ -53,6 +53,7 @@ STATISTIC(NumFactoryMethodsAsInitializers,
           "# of factory methods mapped to initializers");
 
 using namespace swift;
+using namespace importer;
 
 namespace swift {
 namespace inferred_attributes {
@@ -84,12 +85,12 @@ static Pattern *createTypedNamedPattern(VarDecl *decl) {
   return P;
 }
 
-template <size_t A, size_t B>
+#ifndef NDEBUG
 static bool verifyNameMapping(MappedTypeNameKind NameMapping,
-                              const char (&left)[A], const char (&right)[B]) {
-  return NameMapping == MappedTypeNameKind::DoNothing ||
-         strcmp(left, right) != 0;
+                              StringRef left, StringRef right) {
+  return NameMapping == MappedTypeNameKind::DoNothing || left != right;
 }
+#endif
 
 /// \brief Map a well-known C type to a swift type from the standard library.
 ///
@@ -321,9 +322,9 @@ static FuncDecl *makeRawValueTrivialGetter(ClangImporter::Implementation &Impl,
   if (Impl.hasFinishedTypeChecking())
     return getterDecl;
 
-  auto selfRef = new (C) DeclRefExpr(selfDecl, SourceLoc(), /*implicit*/ true);
+  auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(), /*implicit*/ true);
   auto valueRef = new (C) MemberRefExpr(selfRef, SourceLoc(),
-                                        rawDecl, SourceLoc(),
+                                        rawDecl, DeclNameLoc(),
                                         /*implicit*/ true);
   auto valueRet = new (C) ReturnStmt(SourceLoc(), valueRef);
   
@@ -332,8 +333,7 @@ static FuncDecl *makeRawValueTrivialGetter(ClangImporter::Implementation &Impl,
                                 /*implicit*/ true);
   getterDecl->setBody(body);
   
-  // Add as an external definition.
-  C.addedExternalDecl(getterDecl);
+  C.addExternalDecl(getterDecl);
 
   return getterDecl;
 }
@@ -354,7 +354,7 @@ static FuncDecl *makeRawValueTrivialSetter(ClangImporter::Implementation &Impl,
 
   auto *selfDecl = ParamDecl::createSelf(SourceLoc(), importedDecl,
                                          /*static*/false, /*inout*/true);
-  auto *newValueDecl = new (C) ParamDecl(/*IsLet*/true, SourceLoc(),
+  auto *newValueDecl = new (C) ParamDecl(/*IsLet*/true, SourceLoc(),SourceLoc(),
                                          Identifier(), SourceLoc(),
                                          C.Id_value, rawType, importedDecl);
   newValueDecl->setImplicit();
@@ -380,11 +380,11 @@ static FuncDecl *makeRawValueTrivialSetter(ClangImporter::Implementation &Impl,
   if (Impl.hasFinishedTypeChecking())
     return setterDecl;
 
-  auto selfRef = new (C) DeclRefExpr(selfDecl, SourceLoc(), /*implicit*/ true);
-  auto dest = new (C) MemberRefExpr(selfRef, SourceLoc(), rawDecl, SourceLoc(),
+  auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(), /*implicit*/ true);
+  auto dest = new (C) MemberRefExpr(selfRef, SourceLoc(), rawDecl, DeclNameLoc(),
                                     /*implicit*/ true);
 
-  auto paramRef = new (C) DeclRefExpr(newValueDecl, SourceLoc(),
+  auto paramRef = new (C) DeclRefExpr(newValueDecl, DeclNameLoc(),
                                       /*implicit*/true);
 
   auto assign = new (C) AssignExpr(dest, SourceLoc(), paramRef,
@@ -394,8 +394,7 @@ static FuncDecl *makeRawValueTrivialSetter(ClangImporter::Implementation &Impl,
                                 /*implicit*/ true);
   setterDecl->setBody(body);
 
-  // Add as an external definition.
-  C.addedExternalDecl(setterDecl);
+  C.addExternalDecl(setterDecl);
 
   return setterDecl;
 }
@@ -418,7 +417,7 @@ makeEnumRawValueConstructor(ClangImporter::Implementation &Impl,
   auto selfDecl = ParamDecl::createSelf(SourceLoc(), enumDecl,
                                         /*static*/false, /*inout*/true);
 
-  auto param = new (C) ParamDecl(/*let*/ true,
+  auto param = new (C) ParamDecl(/*let*/ true, SourceLoc(),
                                  SourceLoc(), C.Id_rawValue,
                                  SourceLoc(), C.Id_rawValue,
                                  enumDecl->getRawType(),
@@ -445,13 +444,13 @@ makeEnumRawValueConstructor(ClangImporter::Implementation &Impl,
   if (Impl.hasFinishedTypeChecking())
     return ctorDecl;
   
-  auto selfRef = new (C) DeclRefExpr(selfDecl, SourceLoc(), /*implicit*/true);
-  auto paramRef = new (C) DeclRefExpr(param, SourceLoc(),
+  auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(), /*implicit*/true);
+  auto paramRef = new (C) DeclRefExpr(param, DeclNameLoc(),
                                       /*implicit*/ true);
   auto reinterpretCast
     = cast<FuncDecl>(getBuiltinValueDecl(C,C.getIdentifier("reinterpretCast")));
   auto reinterpretCastRef
-    = new (C) DeclRefExpr(reinterpretCast, SourceLoc(), /*implicit*/ true);
+    = new (C) DeclRefExpr(reinterpretCast, DeclNameLoc(), /*implicit*/ true);
   auto reinterpreted = new (C) CallExpr(reinterpretCastRef, paramRef,
                                         /*implicit*/ true);
   auto assign = new (C) AssignExpr(selfRef, SourceLoc(), reinterpreted,
@@ -461,7 +460,7 @@ makeEnumRawValueConstructor(ClangImporter::Implementation &Impl,
   
   ctorDecl->setBody(body);
   
-  C.addedExternalDecl(ctorDecl);
+  C.addExternalDecl(ctorDecl);
   
   return ctorDecl;
 }
@@ -504,11 +503,11 @@ static FuncDecl *makeEnumRawValueGetter(ClangImporter::Implementation &Impl,
   if (Impl.hasFinishedTypeChecking())
     return getterDecl;
   
-  auto selfRef = new (C) DeclRefExpr(selfDecl, SourceLoc(), /*implicit*/true);
+  auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(), /*implicit*/true);
   auto reinterpretCast
     = cast<FuncDecl>(getBuiltinValueDecl(C, C.getIdentifier("reinterpretCast")));
   auto reinterpretCastRef
-    = new (C) DeclRefExpr(reinterpretCast, SourceLoc(), /*implicit*/ true);
+    = new (C) DeclRefExpr(reinterpretCast, DeclNameLoc(), /*implicit*/ true);
   auto reinterpreted = new (C) CallExpr(reinterpretCastRef, selfRef,
                                         /*implicit*/ true);
   auto ret = new (C) ReturnStmt(SourceLoc(), reinterpreted);
@@ -516,7 +515,7 @@ static FuncDecl *makeEnumRawValueGetter(ClangImporter::Implementation &Impl,
                                 /*implicit*/ true);
   
   getterDecl->setBody(body);
-  C.addedExternalDecl(getterDecl);
+  C.addExternalDecl(getterDecl);
   return getterDecl;
 }
 
@@ -553,7 +552,7 @@ static FuncDecl *makeFieldSetterDecl(ClangImporter::Implementation &Impl,
   auto &C = Impl.SwiftContext;
   auto selfDecl = ParamDecl::createSelf(SourceLoc(), importedDecl,
                                         /*isStatic*/false, /*isInOut*/true);
-  auto newValueDecl = new (C) ParamDecl(/*isLet */ true, SourceLoc(),
+  auto newValueDecl = new (C) ParamDecl(/*isLet */ true,SourceLoc(),SourceLoc(),
                                         Identifier(), SourceLoc(), C.Id_value,
                                         importedFieldDecl->getType(),
                                         importedDecl);
@@ -620,43 +619,44 @@ makeUnionFieldAccessors(ClangImporter::Implementation &Impl,
   {
     auto selfDecl = getterDecl->getImplicitSelfDecl();
 
-    auto selfRef = new (C) DeclRefExpr(selfDecl, SourceLoc(), /*implicit*/ true);
+    auto selfRef = new (C) DeclRefExpr(selfDecl, DeclNameLoc(),
+                                       /*implicit*/ true);
     auto reinterpretCast = cast<FuncDecl>(getBuiltinValueDecl(
         C, C.getIdentifier("reinterpretCast")));
     auto reinterpretCastRef
-      = new (C) DeclRefExpr(reinterpretCast, SourceLoc(), /*implicit*/ true);
+      = new (C) DeclRefExpr(reinterpretCast, DeclNameLoc(), /*implicit*/ true);
     auto reinterpreted = new (C) CallExpr(reinterpretCastRef, selfRef,
                                           /*implicit*/ true);
     auto ret = new (C) ReturnStmt(SourceLoc(), reinterpreted);
     auto body = BraceStmt::create(C, SourceLoc(), ASTNode(ret), SourceLoc(),
                                   /*implicit*/ true);
     getterDecl->setBody(body);
-    C.addedExternalDecl(getterDecl);
+    C.addExternalDecl(getterDecl);
   }
 
   // Synthesize the setter body
   {
     auto inoutSelfDecl = setterDecl->getImplicitSelfDecl();
 
-    auto inoutSelfRef = new (C) DeclRefExpr(inoutSelfDecl, SourceLoc(),
+    auto inoutSelfRef = new (C) DeclRefExpr(inoutSelfDecl, DeclNameLoc(),
                                             /*implicit*/ true);
     auto inoutSelf = new (C) InOutExpr(SourceLoc(), inoutSelfRef,
       InOutType::get(importedUnionDecl->getType()), /*implicit*/ true);
 
     auto newValueDecl = setterDecl->getParameterList(1)->get(0);
 
-    auto newValueRef = new (C) DeclRefExpr(newValueDecl, SourceLoc(),
+    auto newValueRef = new (C) DeclRefExpr(newValueDecl, DeclNameLoc(),
                                            /*implicit*/ true);
     auto addressofFn = cast<FuncDecl>(getBuiltinValueDecl(
       C, C.getIdentifier("addressof")));
     auto addressofFnRef
-      = new (C) DeclRefExpr(addressofFn, SourceLoc(), /*implicit*/ true);
+      = new (C) DeclRefExpr(addressofFn, DeclNameLoc(), /*implicit*/ true);
     auto selfPointer = new (C) CallExpr(addressofFnRef, inoutSelf,
                                           /*implicit*/ true);
     auto initializeFn = cast<FuncDecl>(getBuiltinValueDecl(
       C, C.getIdentifier("initialize")));
     auto initializeFnRef
-      = new (C) DeclRefExpr(initializeFn, SourceLoc(), /*implicit*/ true);
+      = new (C) DeclRefExpr(initializeFn, DeclNameLoc(), /*implicit*/ true);
     auto initializeArgs = TupleExpr::createImplicit(C,
                                                    { newValueRef, selfPointer },
                                                    {});
@@ -665,7 +665,7 @@ makeUnionFieldAccessors(ClangImporter::Implementation &Impl,
     auto body = BraceStmt::create(C, SourceLoc(), { initialize }, SourceLoc(),
                                   /*implicit*/ true);
     setterDecl->setBody(body);
-    C.addedExternalDecl(setterDecl);
+    C.addExternalDecl(setterDecl);
   }
 
   return { getterDecl, setterDecl };
@@ -1103,18 +1103,12 @@ StringRef ClangImporter::Implementation::getCFTypeName(
 
   if (auto pointee = CFPointeeInfo::classifyTypedef(decl)) {
     auto name = decl->getName();
-    if (pointee.isRecord()) {
+    if (pointee.isRecord() || pointee.isTypedef()) {
       auto resultName = getImportedCFTypeName(name);
       if (secondaryName && name != resultName)
         *secondaryName = name;
 
       return resultName;
-    }
-
-    if (pointee.isTypedef() && secondaryName) {
-      StringRef otherName = getImportedCFTypeName(name);
-      if (otherName != name) 
-        *secondaryName = otherName;
     }
 
     return name;
@@ -1125,11 +1119,11 @@ StringRef ClangImporter::Implementation::getCFTypeName(
 
 /// Add an AvailableAttr to the declaration for the given
 /// version range.
-static void applyAvailableAttribute(Decl *decl, VersionRange &range,
+static void applyAvailableAttribute(Decl *decl, AvailabilityContext &info,
                                     ASTContext &C) {
   // If the range is "all", this is the same as not having an available
   // attribute.
-  if (!range.hasLowerEndpoint())
+  if (info.isAlwaysAvailable())
     return;
 
   clang::VersionTuple noVersion;
@@ -1137,7 +1131,7 @@ static void applyAvailableAttribute(Decl *decl, VersionRange &range,
                                       targetPlatform(C.LangOpts),
                                       /*message=*/StringRef(),
                                       /*rename=*/StringRef(),
-                                      range.getLowerEndpoint(),
+                                      info.getOSVersion().getLowerEndpoint(),
                                       /*deprecated=*/noVersion,
                                       /*obsoleted=*/noVersion,
                                       UnconditionalAvailabilityKind::None,
@@ -1159,22 +1153,98 @@ static void inferProtocolMemberAvailability(ClangImporter::Implementation &impl,
   if (!valueDecl)
     return;
 
-  VersionRange requiredRange =
+  AvailabilityContext requiredRange =
       AvailabilityInference::inferForType(valueDecl->getType());
 
   ASTContext &C = impl.SwiftContext;
 
-  VersionRange containingDeclRange = AvailabilityInference::availableRange(
-      dc->getInnermostDeclarationDeclContext(), C);
+  const Decl *innermostDecl = dc->getInnermostDeclarationDeclContext();
+  AvailabilityContext containingDeclRange =
+      AvailabilityInference::availableRange(innermostDecl, C);
 
-  requiredRange.constrainWith(containingDeclRange);
+  requiredRange.intersectWith(containingDeclRange);
 
   applyAvailableAttribute(valueDecl, requiredRange, C);
 }
 
-namespace {
-  typedef ClangImporter::Implementation::EnumKind EnumKind;
+/// Add a domain error member, as required by conformance to _BridgedNSError
+/// Returns true on success, false on failure
+static bool addErrorDomain(NominalTypeDecl *swiftDecl,
+                           clang::NamedDecl *errorDomainDecl,
+                           ClangImporter::Implementation &importer) {
+  auto &swiftCtx = importer.SwiftContext;
+  auto swiftValueDecl =
+      dyn_cast_or_null<ValueDecl>(importer.importDecl(errorDomainDecl));
+  auto stringTy = swiftCtx.getStringDecl()->getDeclaredType();
+  assert(stringTy && "no string type available");
+  if (!swiftValueDecl || !swiftValueDecl->getType()->isEqual(stringTy)) {
+    // Couldn't actually import it as an error enum, fall back to enum
+    return false;
+  }
 
+  SourceLoc noLoc = SourceLoc();
+  bool isStatic = true;
+  bool isImplicit = true;
+
+  DeclRefExpr *domainDeclRef = new (swiftCtx)
+      DeclRefExpr(ConcreteDeclRef(swiftValueDecl), {}, isImplicit);
+  ParameterList *params[] = {
+      ParameterList::createWithoutLoc(
+          ParamDecl::createSelf(noLoc, swiftDecl, isStatic)),
+      ParameterList::createEmpty(swiftCtx)};
+  auto toStringTy = ParameterList::getFullType(stringTy, params);
+
+  FuncDecl *getterDecl = FuncDecl::create(
+      swiftCtx, noLoc, StaticSpellingKind::None, noLoc, {}, noLoc, noLoc, noLoc,
+      nullptr, toStringTy, params, TypeLoc::withoutLoc(stringTy), swiftDecl);
+
+  // Make the property decl
+  auto errorDomainPropertyDecl = new (swiftCtx) VarDecl(
+      isStatic,
+      /*isLet=*/false, noLoc, swiftCtx.Id_NSErrorDomain, stringTy, swiftDecl);
+  errorDomainPropertyDecl->setAccessibility(Accessibility::Public);
+
+  swiftDecl->addMember(errorDomainPropertyDecl);
+  swiftDecl->addMember(getterDecl);
+  errorDomainPropertyDecl->makeComputed(noLoc, getterDecl, /*Set=*/nullptr,
+                                        /*MaterializeForSet=*/nullptr, noLoc);
+
+  getterDecl->setImplicit();
+  getterDecl->setStatic(isStatic);
+  getterDecl->setBodyResultType(stringTy);
+  getterDecl->setAccessibility(Accessibility::Public);
+
+  auto ret = new (swiftCtx) ReturnStmt(noLoc, {domainDeclRef});
+  getterDecl->setBody(
+      BraceStmt::create(swiftCtx, noLoc, {ret}, noLoc, isImplicit));
+  importer.registerExternalDecl(getterDecl);
+  return true;
+}
+
+/// As addErrorDomain above, but performs a lookup
+static bool addErrorDomain(NominalTypeDecl *swiftDecl,
+                           clang::IdentifierInfo *errorDomainDeclName,
+                           ClangImporter::Implementation &importer) {
+  auto &clangSema = importer.getClangSema();
+  clang::LookupResult lookupResult(
+      clangSema, clang::DeclarationName(errorDomainDeclName),
+      clang::SourceLocation(), clang::Sema::LookupNameKind::LookupOrdinaryName);
+
+  if (!clangSema.LookupName(lookupResult, clangSema.TUScope)) {
+    // Couldn't actually import it as an error enum, fall back to enum
+    return false;
+  }
+
+  auto clangNamedDecl = lookupResult.getAsSingle<clang::NamedDecl>();
+  if (!clangNamedDecl) {
+    // Couldn't actually import it as an error enum, fall back to enum
+    return false;
+  }
+
+  return addErrorDomain(swiftDecl, clangNamedDecl, importer);
+}
+
+namespace {
   /// \brief Convert Clang declarations into the corresponding Swift
   /// declarations.
   class SwiftDeclConverter
@@ -1277,8 +1347,8 @@ namespace {
       if (!importedSuperclassDecl) return Type();
 
       auto importedSuperclass =
-        cast<TypeAliasDecl>(importedSuperclassDecl)->getDeclaredType();
-      assert(importedSuperclass->is<ClassType>());
+        cast<TypeDecl>(importedSuperclassDecl)->getDeclaredType();
+      assert(importedSuperclass->is<ClassType>() && "must have class type");
       return importedSuperclass;
     }
 
@@ -1356,7 +1426,6 @@ namespace {
       if (Name.empty())
         return nullptr;
 
-      ValueDecl *alternateDecl = nullptr;
       Type SwiftType;
       if (Decl->getDeclContext()->getRedeclContext()->isTranslationUnit()) {
         bool IsError;
@@ -1372,74 +1441,102 @@ namespace {
         // 'typedef const void *FooRef;' as CF types if they have the
         // right attributes or match our name whitelist.
         if (!SwiftType) {
+          auto DC = Impl.importDeclContextOf(Decl);
+          if (!DC)
+            return nullptr;
+
+          // Local function to create the alias, if needed.
+          auto createAlias = [&](TypeDecl *primary) {
+            if (!importedName.Alias) return;
+
+            auto aliasRef = Impl.createDeclWithClangNode<TypeAliasDecl>(
+                              Decl,
+                              Impl.importSourceLoc(Decl->getLocStart()),
+                              importedName.Alias.getBaseName(),
+                              Impl.importSourceLoc(Decl->getLocation()),
+                              TypeLoc::withoutLoc(
+                                primary->getDeclaredInterfaceType()),
+                              DC);
+            aliasRef->computeType();
+
+            // Record this as the alternate declaration.
+            Impl.AlternateDecls[primary] = aliasRef;
+
+            // The "Ref" variants are deprecated and will be
+            // removed. Stage their removal via
+            // -enable-omit-needless-words.
+            auto attr = AvailableAttr::createUnconditional(
+                          Impl.SwiftContext,
+                          "",
+                          primary->getName().str(),
+                          Impl.OmitNeedlessWords
+                            ? UnconditionalAvailabilityKind::UnavailableInSwift
+                            : UnconditionalAvailabilityKind::Deprecated);
+            aliasRef->getAttrs().add(attr);
+          };
+
           if (auto pointee = CFPointeeInfo::classifyTypedef(Decl)) {
             // If the pointee is a record, consider creating a class type.
             if (pointee.isRecord()) {
-              auto SwiftClass = importCFClassType(Decl, Name, pointee);
-              if (!SwiftClass) return nullptr;
+              auto swiftClass = importCFClassType(Decl, Name, pointee);
+              if (!swiftClass) return nullptr;
 
-              SwiftType = SwiftClass->getDeclaredInterfaceType();
-              NameMapping = MappedTypeNameKind::DefineOnly;
-
-              // If there is an alias (i.e., that doesn't have "Ref"),
-              // use that as the name of the typedef later.
-              if (importedName.Alias)
-                Name = importedName.Alias.getBaseName();
-
-              // Record the class as the alternate decl.
-              alternateDecl = SwiftClass;
+              Impl.SpecialTypedefNames[Decl->getCanonicalDecl()] =
+                MappedTypeNameKind::DefineAndUse;
+              createAlias(swiftClass);
+              return swiftClass;
+            }
 
             // If the pointee is another CF typedef, create an extra typealias
             // for the name without "Ref", but not a separate type.
-            } else if (pointee.isTypedef()) {
+            if (pointee.isTypedef()) {
               auto underlying =
                 cast_or_null<TypeDecl>(Impl.importDecl(pointee.getTypedef()));
               if (!underlying)
                 return nullptr;
 
-              if (auto typealias = dyn_cast<TypeAliasDecl>(underlying)) {
-                Type doublyUnderlyingTy = typealias->getUnderlyingType();
-                if (isa<NameAliasType>(doublyUnderlyingTy.getPointer()))
-                  SwiftType = doublyUnderlyingTy;
-              }
-              if (!SwiftType)
-                SwiftType = underlying->getDeclaredType();
+              // Create a typealias for this CF typedef.
+              TypeAliasDecl *typealias = nullptr;
+              typealias = Impl.createDeclWithClangNode<TypeAliasDecl>(
+                            Decl,
+                            Impl.importSourceLoc(Decl->getLocStart()),
+                            Name,
+                            Impl.importSourceLoc(Decl->getLocation()),
+                            TypeLoc::withoutLoc(
+                              underlying->getDeclaredInterfaceType()),
+                            DC);
+              typealias->computeType();
 
-              auto DC = Impl.importDeclContextOf(Decl);
-              if (!DC)
-                return nullptr;
+              Impl.SpecialTypedefNames[Decl->getCanonicalDecl()] =
+                MappedTypeNameKind::DefineAndUse;
+              createAlias(typealias);
+              return typealias;
+            }
 
-              // If there is an alias (i.e., that doesn't have "Ref"),
-              // create that separate typedef.
-              if (importedName.Alias) {
-                auto aliasWithoutRef =
-                  Impl.createDeclWithClangNode<TypeAliasDecl>(
-                    Decl,
-                    Impl.importSourceLoc(Decl->getLocStart()),
-                    importedName.Alias.getBaseName(),
-                    Impl.importSourceLoc(Decl->getLocation()),
-                    TypeLoc::withoutLoc(SwiftType),
-                    DC);
-
-                aliasWithoutRef->computeType();
-                SwiftType = aliasWithoutRef->getDeclaredType();
-                NameMapping = MappedTypeNameKind::DefineOnly;
-
-                // Store this alternative declaration.
-                alternateDecl = aliasWithoutRef;
-              } else {
-                NameMapping = MappedTypeNameKind::DefineAndUse;
-              }
-
-            // If the pointee is 'const void', 
-            // 'CFTypeRef', bring it in specifically as AnyObject.
-            } else if (pointee.isConstVoid()) {
+            // If the pointee is 'const void', 'CFTypeRef', bring it
+            // in specifically as AnyObject.
+            if (pointee.isConstVoid()) {
               auto proto = Impl.SwiftContext.getProtocol(
                                                KnownProtocolKind::AnyObject);
               if (!proto)
                 return nullptr;
-              SwiftType = proto->getDeclaredType();
-              NameMapping = MappedTypeNameKind::DefineOnly;
+
+              // Create a typealias for this CF typedef.
+              TypeAliasDecl *typealias = nullptr;
+              typealias = Impl.createDeclWithClangNode<TypeAliasDecl>(
+                            Decl,
+                            Impl.importSourceLoc(Decl->getLocStart()),
+                            Name,
+                            Impl.importSourceLoc(Decl->getLocation()),
+                            TypeLoc::withoutLoc(
+                              proto->getDeclaredInterfaceType()),
+                            DC);
+              typealias->computeType();
+
+              Impl.SpecialTypedefNames[Decl->getCanonicalDecl()] =
+                MappedTypeNameKind::DefineAndUse;
+              createAlias(typealias);
+              return typealias;
             }
           }
         }
@@ -1496,9 +1593,6 @@ namespace {
                                       TypeLoc::withoutLoc(SwiftType),
                                       DC);
       Result->computeType();
-
-      if (alternateDecl)
-        Impl.AlternateDecls[Result] = alternateDecl;
       return Result;
     }
 
@@ -1550,14 +1644,14 @@ namespace {
         // Construct the left-hand reference to self.
         Expr *lhs =
             new (context) DeclRefExpr(constructor->getImplicitSelfDecl(),
-                                      SourceLoc(), /*implicit=*/true);
+                                      DeclNameLoc(), /*implicit=*/true);
 
         // Construct the right-hand call to Builtin.zeroInitializer.
         Identifier zeroInitID = context.getIdentifier("zeroInitializer");
         auto zeroInitializerFunc =
             cast<FuncDecl>(getBuiltinValueDecl(context, zeroInitID));
         auto zeroInitializerRef = new (context) DeclRefExpr(zeroInitializerFunc,
-                                                            SourceLoc(),
+                                                            DeclNameLoc(),
                                                             /*implicit*/ true);
         auto emptyTuple = TupleExpr::createEmpty(context, SourceLoc(),
                                                  SourceLoc(),
@@ -1597,7 +1691,7 @@ namespace {
       for (auto var : members) {
         Identifier argName = wantCtorParamNames ? var->getName()
                                                 : Identifier();
-        auto param = new (context) ParamDecl(/*IsLet*/ true,
+        auto param = new (context) ParamDecl(/*IsLet*/ true, SourceLoc(),
                                              SourceLoc(), argName,
                                              SourceLoc(), var->getName(),
                                              var->getType(), structDecl);
@@ -1646,14 +1740,14 @@ namespace {
               continue;
 
             // Construct left-hand side.
-            Expr *lhs = new (context) DeclRefExpr(selfDecl, SourceLoc(),
+            Expr *lhs = new (context) DeclRefExpr(selfDecl, DeclNameLoc(),
                                                   /*Implicit=*/true);
-            lhs = new (context) MemberRefExpr(lhs, SourceLoc(), var, SourceLoc(),
-                                              /*Implicit=*/true);
+            lhs = new (context) MemberRefExpr(lhs, SourceLoc(), var,
+                                              DeclNameLoc(), /*Implicit=*/true);
 
             // Construct right-hand side.
             auto rhs = new (context) DeclRefExpr(valueParameters[i],
-                                                 SourceLoc(),
+                                                 DeclNameLoc(),
                                                  /*Implicit=*/true);
 
             // Add assignment.
@@ -1764,7 +1858,7 @@ namespace {
       // Construct the original constant. Enum constants without payloads look
       // like simple values, but actually have type 'MyEnum.Type -> MyEnum'.
       auto constantRef = new (Impl.SwiftContext) DeclRefExpr(original,
-                                                             SourceLoc(),
+                                                             DeclNameLoc(),
                                                              /*implicit*/true);
       Type importedEnumTy = importedEnum->getDeclaredTypeInContext();
       auto typeRef = TypeExpr::createImplicit(importedEnumTy,
@@ -1876,7 +1970,8 @@ namespace {
       
       // Create the enum declaration and record it.
       NominalTypeDecl *result;
-      auto enumKind = Impl.classifyEnum(Impl.getClangPreprocessor(), decl);
+      auto enumInfo = Impl.getEnumInfo(decl);
+      auto enumKind = enumInfo.getKind();
       switch (enumKind) {
       case EnumKind::Constants: {
         // There is no declaration. Rather, the type is mapped to the
@@ -1960,33 +2055,41 @@ namespace {
       }
 
       case EnumKind::Enum: {
+        auto &swiftCtx = Impl.SwiftContext;
         EnumDecl *nativeDecl;
         bool declaredNative = hasNativeSwiftDecl(decl, name, dc, nativeDecl);
         if (declaredNative && nativeDecl)
           return nativeDecl;
 
         // Compute the underlying type.
-        auto underlyingType = Impl.importType(decl->getIntegerType(),
-                                              ImportTypeKind::Enum,
-                                              isInSystemModule(dc),
-                                              /*isFullyBridgeable*/false);
+        auto underlyingType = Impl.importType(
+            decl->getIntegerType(), ImportTypeKind::Enum, isInSystemModule(dc),
+            /*isFullyBridgeable*/ false);
         if (!underlyingType)
           return nullptr;
-        
-        auto enumDecl = Impl.createDeclWithClangNode<EnumDecl>(decl,
-                   Impl.importSourceLoc(decl->getLocStart()),
-                   name, Impl.importSourceLoc(decl->getLocation()),
-                   None, nullptr, dc);
+
+        auto enumDecl = Impl.createDeclWithClangNode<EnumDecl>(
+            decl, Impl.importSourceLoc(decl->getLocStart()), name,
+            Impl.importSourceLoc(decl->getLocation()), None, nullptr, dc);
         enumDecl->computeType();
-        
+
         // Set up the C underlying type as its Swift raw type.
         enumDecl->setRawType(underlyingType);
-        
+
         // Add protocol declarations to the enum declaration.
-        enumDecl->setInherited(
-          Impl.SwiftContext.AllocateCopy(
-            llvm::makeArrayRef(TypeLoc::withoutLoc(underlyingType))));
+        SmallVector<TypeLoc, 2> inheritedTypes;
+        inheritedTypes.push_back(TypeLoc::withoutLoc(underlyingType));
+        if (enumInfo.isErrorEnum())
+          inheritedTypes.push_back(TypeLoc::withoutLoc(
+              swiftCtx.getProtocol(KnownProtocolKind::BridgedNSError)
+                  ->getDeclaredType()));
+        enumDecl->setInherited(swiftCtx.AllocateCopy(inheritedTypes));
         enumDecl->setCheckedInheritanceClause();
+
+        // Set up error conformance to be lazily expanded
+        if (enumInfo.isErrorEnum())
+          enumDecl->getAttrs().add(new (swiftCtx) SynthesizedProtocolAttr(
+              KnownProtocolKind::BridgedNSError));
 
         // Provide custom implementations of the init(rawValue:) and rawValue
         // conversions that just do a bitcast. We can't reliably filter a
@@ -1994,23 +2097,21 @@ namespace {
         // undeclared values, and won't ever add cases.
         auto rawValueConstructor = makeEnumRawValueConstructor(Impl, enumDecl);
 
-        auto varName = Impl.SwiftContext.Id_rawValue;
-        auto rawValue = new (Impl.SwiftContext) VarDecl(/*static*/ false,
-                                                   /*IsLet*/ false,
-                                                   SourceLoc(), varName,
-                                                   underlyingType,
-                                                   enumDecl);
+        auto varName = swiftCtx.Id_rawValue;
+        auto rawValue = new (swiftCtx) VarDecl(/*static*/ false,
+                                               /*IsLet*/ false,
+                                               SourceLoc(), varName,
+                                               underlyingType, enumDecl);
         rawValue->setImplicit();
         rawValue->setAccessibility(Accessibility::Public);
         rawValue->setSetterAccessibility(Accessibility::Private);
-        
+
         // Create a pattern binding to describe the variable.
         Pattern *varPattern = createTypedNamedPattern(rawValue);
-        
-        auto rawValueBinding =
-          PatternBindingDecl::create(Impl.SwiftContext, SourceLoc(),
-                                     StaticSpellingKind::None, SourceLoc(),
-                                     varPattern, nullptr, enumDecl);
+
+        auto rawValueBinding = PatternBindingDecl::create(
+            swiftCtx, SourceLoc(), StaticSpellingKind::None, SourceLoc(),
+            varPattern, nullptr, enumDecl);
 
         auto rawValueGetter = makeEnumRawValueGetter(Impl, enumDecl, rawValue);
 
@@ -2018,11 +2119,15 @@ namespace {
         enumDecl->addMember(rawValueGetter);
         enumDecl->addMember(rawValue);
         enumDecl->addMember(rawValueBinding);
-        
         result = enumDecl;
+
+        // Add the domain error member
+        if (enumInfo.isErrorEnum())
+          addErrorDomain(enumDecl, enumInfo.getErrorDomain(), Impl);
+
         break;
       }
-          
+
       case EnumKind::Options: {
         result = importAsOptionSetType(dc, name, decl);
         if (!result)
@@ -2073,7 +2178,7 @@ namespace {
       }
 
       // Add the type decl to ExternalDefinitions so that we can type-check
-      // raw values and IRGen can emit metadata for it.
+      // raw values and SILGen can emit witness tables for derived conformances.
       // FIXME: There might be better ways to do this.
       Impl.registerExternalDecl(result);
       return result;
@@ -2317,7 +2422,7 @@ namespace {
       if (name.empty())
         return nullptr;
 
-      switch (Impl.classifyEnum(Impl.getClangPreprocessor(), clangEnum)) {
+      switch (Impl.getEnumKind(clangEnum)) {
       case EnumKind::Constants: {
         // The enumeration was simply mapped to an integral type. Create a
         // constant with that integral type.
@@ -2462,11 +2567,7 @@ namespace {
       auto loc = Impl.importSourceLoc(decl->getLocation());
 
       // If we had no argument labels to start with, add empty labels now.
-      if (name.isSimpleName()) {
-        llvm::SmallVector<Identifier, 2> argNames(bodyParams->size(),
-                                                  Identifier());
-        name = DeclName(Impl.SwiftContext, name.getBaseName(), argNames);
-      }
+      assert(!name.isSimpleName() && "Cannot have a simple name here");
 
       // FIXME: Poor location info.
       auto nameLoc = Impl.importSourceLoc(decl->getLocation());
@@ -3167,16 +3268,19 @@ namespace {
       // FIXME: But if one of them is now deprecated, should we prefer the
       // other?
       clang::VersionTuple introduced = findLatestIntroduction(objcMethod);
-      VersionRange existingIntroduced =
+      AvailabilityContext existingAvailability =
           AvailabilityInference::availableRange(existingCtor,
                                                 Impl.SwiftContext);
-      assert(!existingIntroduced.isEmpty());
+      assert(!existingAvailability.isKnownUnreachable());
 
-      if (existingIntroduced.isAll()) {
+      if (existingAvailability.isAlwaysAvailable()) {
         if (!introduced.empty())
           return false;
-      } else if (introduced != existingIntroduced.getLowerEndpoint()) {
-        return introduced < existingIntroduced.getLowerEndpoint();
+      } else {
+        VersionRange existingIntroduced = existingAvailability.getOSVersion();
+        if (introduced != existingIntroduced.getLowerEndpoint()) {
+          return introduced < existingIntroduced.getLowerEndpoint();
+        }
       }
 
       // The "introduced" versions are the same. Prefer Convenience over
@@ -3571,7 +3675,7 @@ namespace {
       auto selfDecl = ParamDecl::createSelf(SourceLoc(), dc);
 
       auto paramVarDecl = new (context) ParamDecl(/*isLet=*/false, SourceLoc(),
-                                                  Identifier(), loc,
+                                                  SourceLoc(), Identifier(),loc,
                                                   valueIndex->get(0)->getName(),
                                                   elementTy, dc);
       
@@ -4934,37 +5038,6 @@ namespace {
   };
 }
 
-/// \brief Classify the given Clang enumeration to describe how to import it.
-EnumKind ClangImporter::Implementation::
-classifyEnum(clang::Preprocessor &pp, const clang::EnumDecl *decl) {
-  // Anonymous enumerations simply get mapped to constants of the
-  // underlying type of the enum, because there is no way to conjure up a
-  // name for the Swift type.
-  if (!decl->hasNameForLinkage())
-    return EnumKind::Constants;
-
-  // Was the enum declared using *_ENUM or *_OPTIONS?
-  // FIXME: Use Clang attributes instead of grovelling the macro expansion loc.
-  auto loc = decl->getLocStart();
-  if (loc.isMacroID()) {
-    StringRef MacroName = pp.getImmediateMacroName(loc);
-    if (MacroName == "CF_ENUM" || MacroName == "__CF_NAMED_ENUM" ||
-        MacroName == "OBJC_ENUM" ||
-        MacroName == "SWIFT_ENUM" || MacroName == "SWIFT_ENUM_NAMED")
-      return EnumKind::Enum;
-    if (MacroName == "CF_OPTIONS" || MacroName == "OBJC_OPTIONS"
-        || MacroName == "SWIFT_OPTIONS")
-      return EnumKind::Options;
-  }
-
-  // Hardcode a particular annoying case in the OS X headers.
-  if (decl->getName() == "DYLD_BOOL")
-    return EnumKind::Enum;
-
-  // Fall back to the 'Unknown' path.
-  return EnumKind::Unknown;
-}
-
 Decl *ClangImporter::Implementation::importDeclCached(
     const clang::NamedDecl *ClangDecl) {
   auto Known = ImportedDecls.find(ClangDecl->getCanonicalDecl());
@@ -5396,7 +5469,7 @@ void ClangImporter::Implementation::finishPendingActions() {
         RegisteredExternalDecls.clear();
       } else {
         Decl *D = RegisteredExternalDecls.pop_back_val();
-        SwiftContext.addedExternalDecl(D);
+        SwiftContext.addExternalDecl(D);
         if (auto typeResolver = getTypeResolver())
           if (auto *nominal = dyn_cast<NominalTypeDecl>(D))
             if (!nominal->hasDelayedMembers())
@@ -5529,7 +5602,7 @@ ClangImporter::Implementation::importMirroredDecl(const clang::NamedDecl *decl,
 
       if (proto->getAttrs().hasAttribute<AvailableAttr>()) {
         if (!result->getAttrs().hasAttribute<AvailableAttr>()) {
-          VersionRange protoRange =
+          AvailabilityContext protoRange =
             AvailabilityInference::availableRange(proto, SwiftContext);
           applyAvailableAttribute(result, protoRange, SwiftContext);
         }

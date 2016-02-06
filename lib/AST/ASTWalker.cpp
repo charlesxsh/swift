@@ -233,8 +233,8 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
 #ifndef NDEBUG
     PrettyStackTraceDecl debugStack("walking into body of", AFD);
 #endif
-    if (Walker.shouldWalkIntoFunctionGenericParams() &&
-        AFD->getGenericParams()) {
+    if (AFD->getGenericParams() &&
+        Walker.shouldWalkIntoFunctionGenericParams()) {
 
       // Visit generic params
       for (auto &P : AFD->getGenericParams()->getParams()) {
@@ -249,15 +249,13 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
       // Visit param conformance
       for (auto &Req : AFD->getGenericParams()->getRequirements()) {
         switch (Req.getKind()) {
-        case RequirementKind::SameType:
+        case RequirementReprKind::SameType:
           if (doIt(Req.getFirstTypeLoc()) || doIt(Req.getSecondTypeLoc()))
             return true;
           break;
-        case RequirementKind::Conformance:
-          if (doIt(Req.getSubjectLoc()))
+        case RequirementReprKind::TypeConstraint:
+          if (doIt(Req.getSubjectLoc()) || doIt(Req.getConstraintLoc()))
             return true;
-          break;
-        case RequirementKind::WitnessMarker:
           break;
         }
       }
@@ -293,6 +291,14 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   }
 
   bool visitEnumElementDecl(EnumElementDecl *ED) {
+    if (ED->hasArgumentType()) {
+      if (auto TR = ED->getArgumentTypeLoc().getTypeRepr()) {
+        if (doIt(TR)) {
+          return true;
+        }
+      }
+    }
+
     // The getRawValueExpr should remain the untouched original LiteralExpr for
     // serialization and validation purposes. We only traverse the type-checked
     // form, unless we haven't populated it yet.
@@ -346,15 +352,6 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   Expr *visitSuperRefExpr(SuperRefExpr *E) { return E; }
   Expr *visitOtherConstructorDeclRefExpr(OtherConstructorDeclRefExpr *E) {
     return E;
-  }
-  
-  Expr *visitUnresolvedConstructorExpr(UnresolvedConstructorExpr *E) {
-    if (auto sub = doIt(E->getSubExpr())) {
-      E->setSubExpr(sub);
-      return E;
-    }
-    
-    return nullptr;
   }
   
   Expr *visitOverloadedDeclRefExpr(OverloadedDeclRefExpr *E) { return E; }
@@ -495,16 +492,6 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
     return E;
   }
   Expr *visitUnresolvedDotExpr(UnresolvedDotExpr *E) {
-    if (!E->getBase())
-      return E;
-    
-    if (Expr *E2 = doIt(E->getBase())) {
-      E->setBase(E2);
-      return E;
-    }
-    return nullptr;
-  }
-  Expr *visitUnresolvedSelectorExpr(UnresolvedSelectorExpr *E) {
     if (!E->getBase())
       return E;
     
@@ -821,6 +808,14 @@ class Traversal : public ASTVisitor<Traversal, Expr*, Stmt*,
   
   Expr *visitEditorPlaceholderExpr(EditorPlaceholderExpr *E) {
     HANDLE_SEMANTIC_EXPR(E);
+    return E;
+  }
+
+  Expr *visitObjCSelectorExpr(ObjCSelectorExpr *E) {
+    Expr *sub = doIt(E->getSubExpr());
+    if (!sub) return nullptr;
+
+    E->setSubExpr(sub);
     return E;
   }
 

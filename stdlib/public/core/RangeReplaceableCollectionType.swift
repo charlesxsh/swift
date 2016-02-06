@@ -1,4 +1,4 @@
-//===--- RangeReplaceableCollectionType.swift -----------------*- swift -*-===//
+//===--- RangeReplaceableCollectionType.swift -----------------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -448,6 +448,7 @@ public func +<
 >(lhs: C, rhs: S) -> C {
   var lhs = lhs
   // FIXME: what if lhs is a reference type?  This will mutate it.
+  lhs.reserveCapacity(lhs.count + numericCast(rhs.underestimateCount()))
   lhs.appendContentsOf(rhs)
   return lhs
 }
@@ -467,25 +468,12 @@ public func +<
 
 @warn_unused_result
 public func +<
-    C : RangeReplaceableCollectionType,
-    S : CollectionType
-    where S.Generator.Element == C.Generator.Element
->(lhs: C, rhs: S) -> C {
-  var lhs = lhs
-  // FIXME: what if lhs is a reference type?  This will mutate it.
-  lhs.reserveCapacity(lhs.count + numericCast(rhs.count))
-  lhs.appendContentsOf(rhs)
-  return lhs
-}
-
-@warn_unused_result
-public func +<
     RRC1 : RangeReplaceableCollectionType,
     RRC2 : RangeReplaceableCollectionType 
     where RRC1.Generator.Element == RRC2.Generator.Element
 >(lhs: RRC1, rhs: RRC2) -> RRC1 {
-  var lhs = lhs
   // FIXME: what if lhs is a reference type?  This will mutate it.
+  var lhs = lhs
   lhs.reserveCapacity(lhs.count + numericCast(rhs.count))
   lhs.appendContentsOf(rhs)
   return lhs

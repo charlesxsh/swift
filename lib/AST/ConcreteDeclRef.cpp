@@ -1,4 +1,4 @@
-//===--- ConcreteDeclRef.cpp - Reference to a concrete decl -----*- C++ -*-===//
+//===--- ConcreteDeclRef.cpp - Reference to a concrete decl ---------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -50,8 +50,7 @@ void ConcreteDeclRef::dump(raw_ostream &os) {
         os << ", ";
       }
 
-      os << sub.getArchetype()->getFullName()
-         << "=" << sub.getReplacement().getString();
+      os << sub.getReplacement().getString();
 
       if (sub.getConformances().size()) {
         os << '[';

@@ -17,14 +17,12 @@
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/ClangImporter/ClangImporter.h"
+#include "swift/Parse/Parser.h"
 #include "swift/Serialization/BCReadingExtras.h"
 #include "llvm/Support/raw_ostream.h"
 
 using namespace swift;
 using namespace swift::serialization;
-
-using ConformancePair = std::pair<ProtocolDecl *, ProtocolConformance *>;
-
 
 namespace {
   struct IDAndKind {
@@ -615,19 +613,12 @@ ModuleFile::maybeReadSubstitution(llvm::BitstreamCursor &cursor) {
   if (recordID != decls_block::BOUND_GENERIC_SUBSTITUTION)
     return None;
 
-  TypeID archetypeID, replacementID;
+  TypeID replacementID;
   unsigned numConformances;
   decls_block::BoundGenericSubstitutionLayout::readRecord(scratch,
-                                                          archetypeID,
                                                           replacementID,
                                                           numConformances);
 
-  if (&cursor == &SILCursor) {
-    assert(Types[archetypeID-1].isComplete() &&
-	   "SIL substitutions should always reference existing archetypes");
-  }
-
-  auto archetypeTy = getType(archetypeID)->castTo<ArchetypeType>();
   auto replacementTy = getType(replacementID);
 
   SmallVector<ProtocolConformanceRef, 4> conformanceBuf;
@@ -636,7 +627,7 @@ ModuleFile::maybeReadSubstitution(llvm::BitstreamCursor &cursor) {
   }
 
   lastRecordOffset.reset();
-  return Substitution{archetypeTy, replacementTy,
+  return Substitution{replacementTy,
                       getContext().AllocateCopy(conformanceBuf)};
 }
 
@@ -776,7 +767,7 @@ GenericParamList *ModuleFile::maybeReadGenericParams(DeclContext *DC,
         auto subject = TypeLoc::withoutLoc(getType(rawTypeIDs[0]));
         auto constraint = TypeLoc::withoutLoc(getType(rawTypeIDs[1]));
 
-        requirements.push_back(RequirementRepr::getConformance(subject,
+        requirements.push_back(RequirementRepr::getTypeConstraint(subject,
                                                            SourceLoc(),
                                                            constraint));
         break;
@@ -791,6 +782,7 @@ GenericParamList *ModuleFile::maybeReadGenericParams(DeclContext *DC,
         break;
       }
 
+      case GenericRequirementKind::Superclass:
       case WitnessMarker: {
         // Shouldn't happen where we have requirement representations.
         error();
@@ -870,6 +862,14 @@ void ModuleFile::readGenericRequirements(
         auto constraint = getType(rawTypeIDs[1]);
 
         requirements.push_back(Requirement(RequirementKind::Conformance,
+                                           subject, constraint));
+        break;
+      }
+      case GenericRequirementKind::Superclass: {
+        auto subject = getType(rawTypeIDs[0]);
+        auto constraint = getType(rawTypeIDs[1]);
+
+        requirements.push_back(Requirement(RequirementKind::Superclass,
                                            subject, constraint));
         break;
       }
@@ -1048,11 +1048,47 @@ Decl *ModuleFile::resolveCrossReference(Module *M, uint32_t pathLen) {
     if (!isType)
       pathTrace.addType(filterTy);
 
+    bool retrying = false;
+    retry:
+
     M->lookupQualified(ModuleType::get(M), name,
                        NL_QualifiedDefault | NL_KnownNoDependency,
                        /*typeResolver=*/nullptr, values);
     filterValues(filterTy, nullptr, nullptr, isType, inProtocolExt, None,
                  values);
+
+    // HACK HACK HACK: Omit-needless-words hack to try to cope with
+    // the "NS" prefix being added/removed. No "real" compiler mode
+    // has to go through this path: a Swift 2 compiler will have the
+    // prefix, while a Swift 3 compiler will not have the
+    // prefix. However, one can set OmitNeedlessWords in a Swift 2
+    // compiler to get API dumps and perform basic testing; this hack
+    // keeps that working.
+    if (values.empty() && !retrying &&
+        getContext().LangOpts.OmitNeedlessWords &&
+        (M->getName().str() == "ObjectiveC" ||
+         M->getName().str() == "Foundation")) {
+      if (name.str().startswith("NS")) {
+        if (name.str().size() > 2 && name.str() != "NSCocoaError") {
+          auto known = getKnownFoundationEntity(name.str());
+          if (!known || !nameConflictsWithStandardLibrary(*known)) {
+            // FIXME: lowercasing magic for non-types.
+            name = getContext().getIdentifier(name.str().substr(2));
+            retrying = true;
+            goto retry;
+          }
+        }
+      } else {
+        SmallString<16> buffer;
+        buffer += "NS";
+        buffer += name.str();
+        // FIXME: Try uppercasing for non-types.
+        name = getContext().getIdentifier(buffer);
+        retrying = true;
+        goto retry;
+      }
+    }
+
     break;
   }
 
@@ -1981,6 +2017,22 @@ Decl *ModuleFile::getDecl(DeclID DID, Optional<DeclContext *> ForcedContext) {
         break;
       }
 
+      case decls_block::Swift3Migration_DECL_ATTR: {
+        bool isImplicit;
+        uint64_t renameLength;
+        uint64_t messageLength;
+        serialization::decls_block::Swift3MigrationDeclAttrLayout::readRecord(
+          scratch, isImplicit, renameLength, messageLength);
+        StringRef renameStr = blobData.substr(0, renameLength);
+        StringRef message = blobData.substr(renameLength,
+                                            renameLength + messageLength);
+        DeclName renamed = parseDeclName(getContext(), renameStr);
+        Attr = new (ctx) Swift3MigrationAttr(SourceLoc(), SourceLoc(),
+                                             SourceLoc(), renamed,
+                                             message, SourceLoc(), isImplicit);
+        break;
+      }
+
       case decls_block::WarnUnusedResult_DECL_ATTR: {
         bool isImplicit;
         uint64_t endOfMessageIndex;
@@ -1994,21 +2046,6 @@ Decl *ModuleFile::getDecl(DeclID DID, Optional<DeclContext *> ForcedContext) {
                                               ctx.AllocateCopy(message),
                                               ctx.AllocateCopy(mutableVariant),
                                               SourceLoc(), isImplicit);
-        break;
-      }
-
-      case decls_block::MigrationId_DECL_ATTR: {
-        uint64_t endOfIdentIndex;
-        serialization::decls_block::MigrationIdDeclAttrLayout::readRecord(
-          scratch, endOfIdentIndex);
-
-        StringRef ident = blobData.substr(0, endOfIdentIndex);
-        StringRef pattern = blobData.substr(endOfIdentIndex);
-        Attr = new (ctx) MigrationIdAttr(SourceLoc(), SourceLoc(),
-                                         SourceLoc(),
-                                         ctx.AllocateCopy(ident),
-                                         ctx.AllocateCopy(pattern),
-                                         SourceLoc(), /*isImplicit=*/false);
         break;
       }
 
@@ -2166,9 +2203,9 @@ Decl *ModuleFile::getDecl(DeclID DID, Optional<DeclContext *> ForcedContext) {
                                                     defaultDefinitionID);
     declOrOffset = assocType;
 
+    assocType->setArchetype(getType(archetypeID)->castTo<ArchetypeType>());
     assocType->computeType();
     assocType->setAccessibility(cast<ProtocolDecl>(DC)->getFormalAccess());
-    assocType->setArchetype(getType(archetypeID)->castTo<ArchetypeType>());
     if (isImplicit)
       assocType->setImplicit();
 
@@ -2441,7 +2478,7 @@ Decl *ModuleFile::getDecl(DeclID DID, Optional<DeclContext *> ForcedContext) {
     if (declOrOffset.isComplete())
       return declOrOffset;
 
-    auto param = createDecl<ParamDecl>(isLet, SourceLoc(),
+    auto param = createDecl<ParamDecl>(isLet, SourceLoc(), SourceLoc(),
                                        getIdentifier(argNameID), SourceLoc(),
                                        getIdentifier(paramNameID), type, DC);
 

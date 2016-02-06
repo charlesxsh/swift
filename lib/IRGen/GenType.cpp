@@ -68,25 +68,6 @@ void TypeInfo::initialize(IRGenFunction &IGF, Address dest, Address src,
   }
 }
 
-Address TypeInfo::initializeBufferWithTake(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const {
-  Address destAddr = emitAllocateBuffer(IGF, T, destBuffer);
-  initializeWithTake(IGF, destAddr, srcAddr, T);
-  return destAddr;
-}
-
-Address TypeInfo::initializeBufferWithCopy(IRGenFunction &IGF,
-                                           Address destBuffer,
-                                           Address srcAddr,
-                                           SILType T) const {
-  Address destAddr = emitAllocateBuffer(IGF, T, destBuffer);
-  initializeWithCopy(IGF, destAddr, srcAddr, T);
-  return destAddr;
-}
-
-
 bool TypeInfo::isSingleRetainablePointer(ResilienceExpansion expansion,
                                          ReferenceCounting *refcounting) const {
   return false;
@@ -354,9 +335,9 @@ Address TypeInfo::getUndefAddress() const {
 }
 
 /// Whether this type is known to be empty.
-bool TypeInfo::isKnownEmpty() const {
+bool TypeInfo::isKnownEmpty(ResilienceExpansion expansion) const {
   if (auto fixed = dyn_cast<FixedTypeInfo>(this))
-    return fixed->isKnownEmpty();
+    return fixed->isKnownEmpty(expansion);
   return false;
 }
 
@@ -879,7 +860,10 @@ void TypeConverter::popGenericContext(CanGenericSignature signature) {
 }
 
 ArchetypeBuilder &TypeConverter::getArchetypes() {
-  return IGM.SILMod->Types.getArchetypes();
+  auto moduleDecl = IGM.SILMod->getSwiftModule();
+  auto genericSig = IGM.SILMod->Types.getCurGenericContext();
+  return *moduleDecl->getASTContext()
+      .getOrCreateArchetypeBuilder(genericSig, moduleDecl);
 }
 
 ArchetypeBuilder &IRGenModule::getContextArchetypes() {
@@ -1643,7 +1627,8 @@ namespace {
 
     // If the type isn't actually dependent, we're okay.
     bool visit(CanType type) {
-      if (!type->hasArchetype()) return false;
+      if (!type->hasArchetype() && !type->hasTypeParameter())
+        return false;
       return CanTypeVisitor::visit(type);
     }
 
@@ -1660,7 +1645,7 @@ namespace {
         return true;
 
       for (auto field : decl->getStoredProperties()) {
-        if (visit(field->getType()->getCanonicalType()))
+        if (visit(field->getInterfaceType()->getCanonicalType()))
           return true;
       }
       return false;
@@ -1683,7 +1668,7 @@ namespace {
       for (auto elt : decl->getAllElements()) {
         if (elt->hasArgumentType() &&
             !elt->isIndirect() &&
-            visit(elt->getArgumentType()->getCanonicalType()))
+            visit(elt->getArgumentInterfaceType()->getCanonicalType()))
           return true;
       }
       return false;
@@ -1702,7 +1687,9 @@ namespace {
 
     // The IR-generation for function types is specifically not
     // type-dependent.
-    bool visitAnyFunctionType(CanAnyFunctionType type) { return false; }
+    bool visitAnyFunctionType(CanAnyFunctionType type) {
+      return false;
+    }
 
     // The safe default for a dependent type is to assume that it
     // needs its own implementation.
@@ -1716,11 +1703,11 @@ static bool isIRTypeDependent(IRGenModule &IGM, NominalTypeDecl *decl) {
   assert(!isa<ProtocolDecl>(decl));
   if (isa<ClassDecl>(decl)) {
     return false;
-  } else if (auto sd = dyn_cast<StructDecl>(decl)) {
-    return IsIRTypeDependent(IGM).visitStructDecl(sd);
+  } else if (auto structDecl = dyn_cast<StructDecl>(decl)) {
+    return IsIRTypeDependent(IGM).visitStructDecl(structDecl);
   } else {
-    auto ed = cast<EnumDecl>(decl);
-    return IsIRTypeDependent(IGM).visitEnumDecl(ed);
+    auto enumDecl = cast<EnumDecl>(decl);
+    return IsIRTypeDependent(IGM).visitEnumDecl(enumDecl);
   }
 }
 
@@ -2037,8 +2024,12 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM, SILType t,
     if (tuple->getNumElements() == 1)
       return t.getTupleElementType(0);
 
-  // TODO: Consider resilience for structs and enums.
   if (auto structDecl = t.getStructOrBoundGenericStruct()) {
+    // If the struct has to be accessed resiliently from this resilience domain,
+    // we can't assume anything about its layout.
+    if (IGM.isResilient(structDecl, expansion))
+      return SILType();
+
     // C ABI wackiness may cause a single-field struct to have different layout
     // from its field.
     if (structDecl->hasUnreferenceableStorage()
@@ -2056,6 +2047,11 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM, SILType t,
   }
 
   if (auto enumDecl = t.getEnumOrBoundGenericEnum()) {
+    // If the enum has to be accessed resiliently from this resilience domain,
+    // we can't assume anything about its layout.
+    if (IGM.isResilient(enumDecl, expansion))
+      return SILType();
+
     auto allCases = enumDecl->getAllElements();
     
     auto theCase = allCases.begin();

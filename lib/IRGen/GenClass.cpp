@@ -235,7 +235,8 @@ namespace {
 
         if (superclass->hasClangNode()) {
           // As a special case, assume NSObject has a fixed layout.
-          if (superclass->getName() != IGM.Context.Id_NSObject) {
+          if (superclass->getName() !=
+                IGM.Context.getSwiftId(KnownFoundationEntity::NSObject)) {
             // If the superclass was imported from Objective-C, its size is
             // not known at compile time. However, since the field offset
             // vector only stores offsets of stored properties defined in
@@ -402,7 +403,7 @@ OwnedAddress irgen::projectPhysicalClassMemberAddress(IRGenFunction &IGF,
                                                       VarDecl *field) {
   // If the field is empty, its address doesn't matter.
   auto &fieldTI = IGF.getTypeInfo(fieldType);
-  if (fieldTI.isKnownEmpty()) {
+  if (fieldTI.isKnownEmpty(ResilienceExpansion::Maximal)) {
     return OwnedAddress(fieldTI.getUndefAddress(), base);
   }
   
@@ -696,6 +697,7 @@ void IRGenModule::emitClassDecl(ClassDecl *D) {
                     classTI.getLayout(*this),
                     classTI.getClassLayout(*this));
   emitNestedTypeDecls(D->getMembers());
+  addNominalTypeDecl(D);
 }
 
 namespace {
@@ -1752,7 +1754,8 @@ const TypeInfo *TypeConverter::convertClassType(ClassDecl *D) {
 }
 
 /// Lazily declare a fake-looking class to represent an ObjC runtime base class.
-ClassDecl *IRGenModule::getObjCRuntimeBaseClass(Identifier name) {
+ClassDecl *IRGenModule::getObjCRuntimeBaseClass(Identifier name,
+                                                Identifier objcName) {
   auto found = SwiftRootClasses.find(name);
   if (found != SwiftRootClasses.end())
     return found->second;
@@ -1764,7 +1767,7 @@ ClassDecl *IRGenModule::getObjCRuntimeBaseClass(Identifier name) {
                                            Context.TheBuiltinModule);
   SwiftRootClass->computeType();
   SwiftRootClass->setIsObjC(true);
-  SwiftRootClass->getAttrs().add(ObjCAttr::createNullary(Context, name,
+  SwiftRootClass->getAttrs().add(ObjCAttr::createNullary(Context, objcName,
                                                          /*implicit=*/true));
   SwiftRootClass->setImplicit();
   SwiftRootClass->setAccessibility(Accessibility::Public);
@@ -1787,7 +1790,7 @@ IRGenModule::getObjCRuntimeBaseForSwiftRootClass(ClassDecl *theClass) {
     // Otherwise, use the standard SwiftObject class.
     name = Context.Id_SwiftObject;
   }
-  return getObjCRuntimeBaseClass(name);
+  return getObjCRuntimeBaseClass(name, name);
 }
 
 ClassDecl *irgen::getRootClassForMetaclass(IRGenModule &IGM, ClassDecl *C) {
@@ -1808,9 +1811,12 @@ ClassDecl *irgen::getRootClassForMetaclass(IRGenModule &IGM, ClassDecl *C) {
   // FIXME: If the root class specifies its own runtime ObjC base class,
   // assume that that base class ultimately inherits NSObject.
   if (C->getAttrs().hasAttribute<SwiftNativeObjCRuntimeBaseAttr>())
-    return IGM.getObjCRuntimeBaseClass(IGM.Context.Id_NSObject);
-  
-  return IGM.getObjCRuntimeBaseClass(IGM.Context.Id_SwiftObject);
+    return IGM.getObjCRuntimeBaseClass(
+             IGM.Context.getSwiftId(KnownFoundationEntity::NSObject),
+             IGM.Context.getIdentifier("NSObject"));
+
+  return IGM.getObjCRuntimeBaseClass(IGM.Context.Id_SwiftObject,
+                                     IGM.Context.Id_SwiftObject);
 }
 
 bool irgen::getClassHasMetadataPattern(IRGenModule &IGM, ClassDecl *theClass) {

@@ -60,7 +60,8 @@ void ConstraintSystem::addTypeVariable(TypeVariableType *typeVar) {
 }
 
 void ConstraintSystem::mergeEquivalenceClasses(TypeVariableType *typeVar1,
-                                               TypeVariableType *typeVar2) {
+                                               TypeVariableType *typeVar2,
+                                               bool updateWorkList) {
   assert(typeVar1 == getRepresentative(typeVar1) &&
          "typeVar1 is not the representative");
   assert(typeVar2 == getRepresentative(typeVar2) &&
@@ -70,7 +71,10 @@ void ConstraintSystem::mergeEquivalenceClasses(TypeVariableType *typeVar1,
 
   // Merge nodes in the constraint graph.
   CG.mergeNodes(typeVar1, typeVar2);
-  addTypeVariableConstraintsToWorkList(typeVar1);
+
+  if (updateWorkList) {
+    addTypeVariableConstraintsToWorkList(typeVar1);
+  }
 }
 
 void ConstraintSystem::assignFixedType(TypeVariableType *typeVar, Type type,
@@ -603,7 +607,7 @@ namespace {
 
         // Open up the generic type.
         cs.openGeneric(unboundDecl,
-                       unboundDecl->getGenericParamTypes(),
+                       unboundDecl->getInnermostGenericParamTypes(),
                        unboundDecl->getGenericRequirements(),
                        /*skipProtocolSelfConstraint=*/false,
                        minOpeningDepth,
@@ -612,7 +616,7 @@ namespace {
 
         // Map the generic parameters to their corresponding type variables.
         llvm::SmallVector<Type, 4> arguments;
-        for (auto gp : unboundDecl->getGenericParamTypes()) {
+        for (auto gp : unboundDecl->getInnermostGenericParamTypes()) {
           assert(replacements.count(gp->getCanonicalType()) && 
                  "Missing generic parameter?");
           arguments.push_back(replacements[gp->getCanonicalType()]);
@@ -917,23 +921,26 @@ void ConstraintSystem::openGeneric(
   switch (req.getKind()) {
     case RequirementKind::Conformance: {
       auto subjectTy = req.getFirstType().transform(replaceDependentTypes);
-      if (auto proto = req.getSecondType()->getAs<ProtocolType>()) {
-        // Determine whether this is the protocol 'Self' constraint we should
-        // skip.
-        if (skipProtocolSelfConstraint &&
-            (proto->getDecl() == dc->isProtocolOrProtocolExtensionContext() ||
-             proto->getDecl()
-               == dc->getParent()->isProtocolOrProtocolExtensionContext())&&
-            isProtocolSelfType(req.getFirstType())) {
-          break;
-        }
-
-        addConstraint(ConstraintKind::ConformsTo, subjectTy, proto,
-                      locatorPtr);
-      } else {
-        auto boundTy = req.getSecondType().transform(replaceDependentTypes);
-        addConstraint(ConstraintKind::Subtype, subjectTy, boundTy, locatorPtr);
+      auto proto = req.getSecondType()->castTo<ProtocolType>();
+      // Determine whether this is the protocol 'Self' constraint we should
+      // skip.
+      if (skipProtocolSelfConstraint &&
+          (proto->getDecl() == dc->isProtocolOrProtocolExtensionContext() ||
+           proto->getDecl()
+             == dc->getParent()->isProtocolOrProtocolExtensionContext())&&
+          isProtocolSelfType(req.getFirstType())) {
+        break;
       }
+
+      addConstraint(ConstraintKind::ConformsTo, subjectTy, proto,
+                    locatorPtr);
+      break;
+    }
+
+    case RequirementKind::Superclass: {
+      auto subjectTy = req.getFirstType().transform(replaceDependentTypes);
+      auto boundTy = req.getSecondType().transform(replaceDependentTypes);
+      addConstraint(ConstraintKind::Subtype, subjectTy, boundTy, locatorPtr);
       break;
     }
 
@@ -1101,8 +1108,8 @@ ConstraintSystem::getTypeOfMemberReference(
                             minOpeningDepth);
 
       // Determine the object type of 'self'.
-      auto nominal = value->getDeclContext()->getDeclaredTypeOfContext()
-                       ->getAnyNominal();
+      auto nominal = value->getDeclContext()
+          ->isNominalTypeOrNominalTypeExtensionContext();
       
       // We want to track if the generic context is represented by a
       // class-bound existential so we won't inappropriately wrap the

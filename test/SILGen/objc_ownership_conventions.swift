@@ -36,7 +36,7 @@ func test5(g: Gizmo) {
   // CHECK:      [[CLASS:%.*]] = metatype $@thick Gizmo.Type
   // CHECK-NEXT: [[METHOD:%.*]] = class_method [volatile] [[CLASS]] : {{.*}}, #Gizmo.inspect!1.foreign
   // CHECK-NEXT: [[OBJC_CLASS:%[0-9]+]] = thick_to_objc_metatype [[CLASS]] : $@thick Gizmo.Type to $@objc_metatype Gizmo.Type
-  // CHECK:      [[V:%.*]] = load %2
+  // CHECK:      [[V:%.*]] = load
   // CHECK:      strong_retain [[V]]
   // CHECK:      [[G:%.*]] = enum $ImplicitlyUnwrappedOptional<Gizmo>, #ImplicitlyUnwrappedOptional.Some!enumelt.1, [[V]]
   // CHECK-NEXT: apply [[METHOD]]([[G]], [[OBJC_CLASS]])
@@ -50,7 +50,7 @@ func test6(g: Gizmo) {
   // CHECK:      [[CLASS:%.*]] = metatype $@thick Gizmo.Type
   // CHECK-NEXT: [[METHOD:%.*]] = class_method [volatile] [[CLASS]] : {{.*}}, #Gizmo.consume!1.foreign
   // CHECK-NEXT: [[OBJC_CLASS:%.*]] = thick_to_objc_metatype [[CLASS]] : $@thick Gizmo.Type to $@objc_metatype Gizmo.Type
-  // CHECK:      [[V:%.*]] = load %2
+  // CHECK:      [[V:%.*]] = load
   // CHECK:      strong_retain [[V]]
   // CHECK:      [[G:%.*]] = enum $ImplicitlyUnwrappedOptional<Gizmo>, #ImplicitlyUnwrappedOptional.Some!
   // CHECK-NEXT: apply [[METHOD]]([[G]], [[OBJC_CLASS]])
@@ -111,7 +111,7 @@ func test9(g: Gizmo) -> Gizmo {
 }
 
 // CHECK-LABEL: sil hidden @_TF26objc_ownership_conventions6test10
-func test10(g: Gizmo) -> AnyClass {
+func test10(let g: Gizmo) -> AnyClass {
   // CHECK: bb0([[G:%[0-9]+]] : $Gizmo):
   // CHECK:      strong_retain [[G]]
   // CHECK-NEXT: [[NS_G:%[0-9]+]] = upcast [[G:%[0-9]+]] : $Gizmo to $NSObject
@@ -131,7 +131,7 @@ func test10(g: Gizmo) -> AnyClass {
 }
 
 // CHECK-LABEL: sil hidden @_TF26objc_ownership_conventions6test11
-func test11(g: Gizmo) -> AnyClass {
+func test11(let g: Gizmo) -> AnyClass {
   // CHECK: bb0([[G:%[0-9]+]] : $Gizmo):
   // CHECK: strong_retain [[G]]
   // CHECK: [[NS_G:%[0-9]+]] = upcast [[G:%[0-9]+]] : $Gizmo to $NSObject

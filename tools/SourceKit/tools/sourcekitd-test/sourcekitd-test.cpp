@@ -71,6 +71,7 @@ static sourcekitd_uid_t KeyCompilerArgs;
 static sourcekitd_uid_t KeyOffset;
 static sourcekitd_uid_t KeySourceFile;
 static sourcekitd_uid_t KeyModuleName;
+static sourcekitd_uid_t KeyGroupName;
 static sourcekitd_uid_t KeyName;
 static sourcekitd_uid_t KeyFilePath;
 static sourcekitd_uid_t KeyModuleInterfaceName;
@@ -154,6 +155,7 @@ static int skt_main(int argc, const char **argv) {
   KeyOffset = sourcekitd_uid_get_from_cstr("key.offset");
   KeySourceFile = sourcekitd_uid_get_from_cstr("key.sourcefile");
   KeyModuleName = sourcekitd_uid_get_from_cstr("key.modulename");
+  KeyGroupName = sourcekitd_uid_get_from_cstr("key.groupname");
   KeyName = sourcekitd_uid_get_from_cstr("key.name");
   KeyFilePath = sourcekitd_uid_get_from_cstr("key.filepath");
   KeyModuleInterfaceName = sourcekitd_uid_get_from_cstr("key.module_interface_name");
@@ -591,6 +593,13 @@ static int handleTestInvocation(ArrayRef<const char *> Args,
   bool IsError = sourcekitd_response_is_error(Resp);
   if (IsError) {
     sourcekitd_response_description_dump(Resp);
+
+  } else if (Opts.PrintResponseAsJSON) {
+    sourcekitd_variant_t Info = sourcekitd_response_get_value(Resp);
+    char *json = sourcekitd_variant_json_description_copy(Info);
+    llvm::outs() << json << '\n';
+    free(json);
+
   } else {
     sourcekitd_variant_t Info = sourcekitd_response_get_value(Resp);
     switch (Opts.Request) {
@@ -840,6 +849,8 @@ static void printCursorInfo(sourcekitd_variant_t Info, StringRef FilenameIn,
                                                                   KeyTypename);
   const char *ModuleName = sourcekitd_variant_dictionary_get_string(Info,
                                                               KeyModuleName);
+  const char *GroupName = sourcekitd_variant_dictionary_get_string(Info,
+                                                                   KeyGroupName);
   const char *ModuleInterfaceName =
       sourcekitd_variant_dictionary_get_string(Info, KeyModuleInterfaceName);
   const char *TypeInterface =
@@ -897,6 +908,8 @@ static void printCursorInfo(sourcekitd_variant_t Info, StringRef FilenameIn,
     OS << Typename << '\n';
   if (ModuleName)
     OS << ModuleName << '\n';
+  if (GroupName)
+    OS << "<Group>" << GroupName << "</Group>" << '\n';
   if (ModuleInterfaceName)
     OS << ModuleInterfaceName << '\n';
   if (IsSystem)

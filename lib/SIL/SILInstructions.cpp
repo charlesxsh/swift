@@ -10,7 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 //
-// This file defines the high-level SILInstruction classes used for  SIL code.
+// This file defines the high-level SILInstruction classes used for SIL code.
 //
 //===----------------------------------------------------------------------===//
 
@@ -77,23 +77,11 @@ AllocRefInst::AllocRefInst(SILDebugLocation *Loc, SILType elementType,
     : AllocationInst(ValueKind::AllocRefInst, Loc, elementType),
       StackPromotable(canBeOnStack), ObjC(objc) {}
 
-// alloc_box returns two results: Builtin.NativeObject & LValue[EltTy]
-static SILTypeList *getAllocBoxType(SILType EltTy, SILFunction &F) {
-  SILType boxTy = SILType::getPrimitiveObjectType(
-                                   SILBoxType::get(EltTy.getSwiftRValueType()));
-
-  SILType ResTys[] = {
-    boxTy,
-    EltTy.getAddressType()
-  };
-
-  return F.getModule().getSILTypeList(ResTys);
-}
-
 AllocBoxInst::AllocBoxInst(SILDebugLocation *Loc, SILType ElementType,
                            SILFunction &F, SILDebugVariable Var)
     : AllocationInst(ValueKind::AllocBoxInst, Loc,
-                     getAllocBoxType(ElementType, F)),
+                     SILType::getPrimitiveObjectType(
+                       SILBoxType::get(ElementType.getSwiftRValueType()))),
       VarInfo(Var, reinterpret_cast<char *>(this + 1)) {}
 
 AllocBoxInst *AllocBoxInst::create(SILDebugLocation *Loc, SILType ElementType,
@@ -139,23 +127,11 @@ VarDecl *DebugValueAddrInst::getDecl() const {
   return getLoc().getAsASTNode<VarDecl>();
 }
 
-static SILTypeList *getAllocExistentialBoxType(SILType ExistTy,
-                                               SILType ConcreteTy,
-                                               SILFunction &F) {
-  SILType Tys[] = {
-    ExistTy.getObjectType(),
-    ConcreteTy.getAddressType(),
-  };
-  return F.getModule().getSILTypeList(Tys);
-}
-
 AllocExistentialBoxInst::AllocExistentialBoxInst(
     SILDebugLocation *Loc, SILType ExistentialType, CanType ConcreteType,
-    SILType ConcreteLoweredType, ArrayRef<ProtocolConformanceRef> Conformances,
-    SILFunction *Parent)
+    ArrayRef<ProtocolConformanceRef> Conformances, SILFunction *Parent)
     : AllocationInst(ValueKind::AllocExistentialBoxInst, Loc,
-                     getAllocExistentialBoxType(ExistentialType,
-                                                ConcreteLoweredType, *Parent)),
+                     ExistentialType.getObjectType()),
       ConcreteType(ConcreteType), Conformances(Conformances) {}
 
 static void declareWitnessTable(SILModule &Mod,
@@ -171,7 +147,7 @@ static void declareWitnessTable(SILModule &Mod,
 
 AllocExistentialBoxInst *AllocExistentialBoxInst::create(
     SILDebugLocation *Loc, SILType ExistentialType, CanType ConcreteType,
-    SILType ConcreteLoweredType, ArrayRef<ProtocolConformanceRef> Conformances,
+    ArrayRef<ProtocolConformanceRef> Conformances,
     SILFunction *F) {
   SILModule &Mod = F->getModule();
   void *Buffer = Mod.allocateInst(sizeof(AllocExistentialBoxInst),
@@ -181,7 +157,6 @@ AllocExistentialBoxInst *AllocExistentialBoxInst::create(
   return ::new (Buffer) AllocExistentialBoxInst(Loc,
                                                 ExistentialType,
                                                 ConcreteType,
-                                                ConcreteLoweredType,
                                                 Conformances, F);
 }
 
@@ -482,7 +457,7 @@ static SILType getPinResultType(SILType operandType) {
 }
 
 StrongPinInst::StrongPinInst(SILDebugLocation *Loc, SILValue operand)
-    : UnaryInstructionBase(Loc, operand, getPinResultType(operand.getType())) {}
+    : UnaryInstructionBase(Loc, operand, getPinResultType(operand->getType())) {}
 
 CopyAddrInst::CopyAddrInst(SILDebugLocation *Loc, SILValue SrcLValue,
                            SILValue DestLValue, IsTake_t isTakeOfSrc,
@@ -544,13 +519,13 @@ bool TupleExtractInst::isTrivialEltOfOneRCIDTuple() const {
 
   // If the elt we are extracting is trivial, we cannot have any non trivial
   // fields.
-  if (getOperand().getType().isTrivial(Mod))
+  if (getOperand()->getType().isTrivial(Mod))
     return false;
 
   // Ok, now we know that our tuple has non-trivial fields. Make sure that our
   // parent tuple has only one non-trivial field.
   bool FoundNonTrivialField = false;
-  SILType OpTy = getOperand().getType();
+  SILType OpTy = getOperand()->getType();
   unsigned FieldNo = getFieldNo();
 
   // For each element index of the tuple...
@@ -592,7 +567,7 @@ bool TupleExtractInst::isEltOnlyNonTrivialElt() const {
 
   // Ok, we know that the elt we are extracting is non-trivial. Make sure that
   // we have no other non-trivial elts.
-  SILType OpTy = getOperand().getType();
+  SILType OpTy = getOperand()->getType();
   unsigned FieldNo = getFieldNo();
 
   // For each element index of the tuple...
@@ -623,7 +598,7 @@ bool StructExtractInst::isTrivialFieldOfOneRCIDStruct() const {
   if (!getType().isTrivial(Mod))
     return false;
 
-  SILType StructTy = getOperand().getType();
+  SILType StructTy = getOperand()->getType();
 
   // If the elt we are extracting is trivial, we cannot have any non trivial
   // fields.
@@ -674,7 +649,7 @@ bool StructExtractInst::isFieldOnlyNonTrivialField() const {
   if (getType().isTrivial(Mod))
     return false;
 
-  SILType StructTy = getOperand().getType();
+  SILType StructTy = getOperand()->getType();
 
   // Ok, we are visiting a non-trivial field. Then for every stored field...
   for (VarDecl *D : getStructDecl()->getStoredProperties()) {
@@ -774,8 +749,13 @@ OperandValueArrayRef CondBranchInst::getFalseArgs() const {
   return Operands.asValueArray().slice(1 + NumTrueArgs, NumFalseArgs);
 }
 
-SILValue
-CondBranchInst::getArgForDestBB(SILBasicBlock *DestBB, SILArgument *A) {
+SILValue CondBranchInst::getArgForDestBB(const SILBasicBlock *DestBB,
+                                         const SILArgument *Arg) const {
+  return getArgForDestBB(DestBB, Arg->getIndex());
+}
+
+SILValue CondBranchInst::getArgForDestBB(const SILBasicBlock *DestBB,
+                                         unsigned ArgIndex) const {
   // If TrueBB and FalseBB equal, we cannot find an arg for this DestBB so
   // return an empty SILValue.
   if (getTrueBB() == getFalseBB()) {
@@ -783,14 +763,12 @@ CondBranchInst::getArgForDestBB(SILBasicBlock *DestBB, SILArgument *A) {
     return SILValue();
   }
 
-  unsigned i = A->getIndex();
-
   if (DestBB == getTrueBB())
-    return Operands[1 + i].get();
+    return Operands[1 + ArgIndex].get();
 
   assert(DestBB == getFalseBB()
          && "By process of elimination BB must be false BB");
-  return Operands[1 + NumTrueArgs + i].get();
+  return Operands[1 + NumTrueArgs + ArgIndex].get();
 }
 
 ArrayRef<Operand> CondBranchInst::getTrueOperands() const {
@@ -857,7 +835,7 @@ SwitchValueInst::SwitchValueInst(SILDebugLocation *Loc, SILValue Operand,
   auto *succs = getSuccessorBuf();
   unsigned OperandBitWidth = 0;
 
-  if (auto OperandTy = Operand.getType().getAs<BuiltinIntegerType>()) {
+  if (auto OperandTy = Operand->getType().getAs<BuiltinIntegerType>()) {
     OperandBitWidth = OperandTy->getGreatestWidth();
   }
 
@@ -928,7 +906,7 @@ SelectValueInst::SelectValueInst(SILDebugLocation *Loc, SILValue Operand,
 
   unsigned OperandBitWidth = 0;
 
-  if (auto OperandTy = Operand.getType().getAs<BuiltinIntegerType>()) {
+  if (auto OperandTy = Operand->getType().getAs<BuiltinIntegerType>()) {
     OperandBitWidth = OperandTy->getGreatestWidth();
   }
 
@@ -1051,13 +1029,15 @@ namespace {
   template <class Inst> EnumElementDecl *
   getUniqueCaseForDefaultValue(Inst *inst, SILValue enumValue) {
     assert(inst->hasDefault() && "doesn't have a default");
-    SILType enumType = enumValue.getType();
-
-    if (!enumType.hasFixedLayout(inst->getModule()))
-      return nullptr;
+    SILType enumType = enumValue->getType();
 
     EnumDecl *decl = enumType.getEnumOrBoundGenericEnum();
     assert(decl && "switch_enum operand is not an enum");
+
+    // FIXME: Get expansion from SILFunction
+    if (!decl->hasFixedLayout(inst->getModule().getSwiftModule(),
+                              ResilienceExpansion::Maximal))
+      return nullptr;
 
     llvm::SmallPtrSet<EnumElementDecl *, 4> unswitchedElts;
     for (auto elt : decl->getAllElements())
@@ -1139,7 +1119,7 @@ NullablePtr<EnumElementDecl> SwitchEnumInstBase::getUniqueCaseForDefault() {
 NullablePtr<EnumElementDecl>
 SwitchEnumInstBase::getUniqueCaseForDestination(SILBasicBlock *BB) {
   SILValue value = getOperand();
-  SILType enumType = value.getType();
+  SILType enumType = value->getType();
   EnumDecl *decl = enumType.getEnumOrBoundGenericEnum();
   assert(decl && "switch_enum operand is not an enum");
   (void)decl;

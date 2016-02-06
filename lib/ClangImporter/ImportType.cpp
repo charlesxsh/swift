@@ -39,6 +39,7 @@
 #include "llvm/ADT/StringExtras.h"
 
 using namespace swift;
+using namespace importer;
 
 /// Given that a type is the result of a special typedef import, was
 /// it originally a CF pointer?
@@ -330,7 +331,10 @@ namespace {
             pointee->getDecl()->getName() == "_NSZone") {
           Identifier Id_ObjectiveC = Impl.SwiftContext.Id_ObjectiveC;
           Module *objCModule = Impl.SwiftContext.getLoadedModule(Id_ObjectiveC);
-          Type wrapperTy = Impl.getNamedSwiftType(objCModule, "NSZone");
+          Type wrapperTy = Impl.getNamedSwiftType(
+                             objCModule,
+                             Impl.SwiftContext.getSwiftName(
+                               KnownFoundationEntity::NSZone));
           if (wrapperTy)
             return wrapperTy;
         }
@@ -564,7 +568,8 @@ namespace {
         case MappedTypeNameKind::DefineAndUse:
           break;
         case MappedTypeNameKind::DefineOnly:
-          mappedType = cast<TypeAliasDecl>(decl)->getUnderlyingType();
+          if (auto typealias = dyn_cast<TypeAliasDecl>(decl))
+            mappedType = typealias->getUnderlyingType();
           break;
         }
 
@@ -654,8 +659,8 @@ namespace {
 
     ImportResult VisitEnumType(const clang::EnumType *type) {
       auto clangDecl = type->getDecl();
-      switch (Impl.classifyEnum(Impl.getClangPreprocessor(), clangDecl)) {
-      case ClangImporter::Implementation::EnumKind::Constants: {
+      switch (Impl.getEnumKind(clangDecl)) {
+      case EnumKind::Constants: {
         auto clangDef = clangDecl->getDefinition();
         // Map anonymous enums with no fixed underlying type to Int /if/
         // they fit in an Int32. If not, this mapping isn't guaranteed to be
@@ -668,9 +673,9 @@ namespace {
         // Import the underlying integer type.
         return Visit(clangDecl->getIntegerType());
       }
-      case ClangImporter::Implementation::EnumKind::Enum:
-      case ClangImporter::Implementation::EnumKind::Unknown:
-      case ClangImporter::Implementation::EnumKind::Options: {
+      case EnumKind::Enum:
+      case EnumKind::Unknown:
+      case EnumKind::Options: {
         auto decl = dyn_cast_or_null<TypeDecl>(Impl.importDecl(clangDecl));
         if (!decl)
           return nullptr;
@@ -722,11 +727,14 @@ namespace {
         }
 
         if (imported->hasName() &&
-            imported->getName().str() == "NSString") {
+            imported->getName()
+              == Impl.SwiftContext.getSwiftId(KnownFoundationEntity::NSString)){
           return { importedType, ImportHint::NSString };
         }
 
-        if (imported->hasName() && imported->getName().str() == "NSArray") {
+        if (imported->hasName() &&
+            imported->getName()
+              == Impl.SwiftContext.getSwiftId(KnownFoundationEntity::NSArray)) {
           // If we have type arguments, import them.
           ArrayRef<clang::QualType> typeArgs = type->getTypeArgs();
           if (typeArgs.size() == 1) {
@@ -742,7 +750,10 @@ namespace {
           return { importedType, ImportHint(ImportHint::NSArray, Type()) };
         }
 
-        if (imported->hasName() && imported->getName().str() == "NSDictionary") {
+        if (imported->hasName() &&
+            imported->getName()
+              == Impl.SwiftContext.getSwiftId(
+                   KnownFoundationEntity::NSDictionary)) {
           // If we have type arguments, import them.
           ArrayRef<clang::QualType> typeArgs = type->getTypeArgs();
           if (typeArgs.size() == 2) {
@@ -769,7 +780,9 @@ namespace {
                    ImportHint(ImportHint::NSDictionary, Type(), Type()) };
         }
 
-        if (imported->hasName() && imported->getName().str() == "NSSet") {
+        if (imported->hasName() &&
+            imported->getName()
+              == Impl.SwiftContext.getSwiftId(KnownFoundationEntity::NSSet)) {
           // If we have type arguments, import them.
           ArrayRef<clang::QualType> typeArgs = type->getTypeArgs();
           if (typeArgs.size() == 1) {
@@ -953,7 +966,8 @@ static Type adjustTypeForConcreteImport(ClangImporter::Implementation &impl,
       return Type();
 
     // FIXME: Avoid string comparison by caching this identifier.
-    if (elementClass->getName().str() != "NSError")
+    if (elementClass->getName().str() !=
+          impl.SwiftContext.getSwiftName(KnownFoundationEntity::NSError))
       return Type();
 
     Module *foundationModule = impl.tryLoadFoundationModule();
@@ -962,7 +976,10 @@ static Type adjustTypeForConcreteImport(ClangImporter::Implementation &impl,
           != elementClass->getModuleContext()->getName())
       return Type();
 
-    return impl.getNamedSwiftType(foundationModule, "NSErrorPointer");
+    return impl.getNamedSwiftType(
+            foundationModule,
+            impl.SwiftContext.getSwiftName(
+              KnownFoundationEntity::NSErrorPointer));
   };
   if (Type result = maybeImportNSErrorPointer())
     return result;
@@ -1433,7 +1450,7 @@ importFunctionType(const clang::FunctionDecl *clangDecl,
     auto bodyVar
       = createDeclWithClangNode<ParamDecl>(param,
                                      /*IsLet*/ true,
-                                     SourceLoc(), name,
+                                     SourceLoc(), SourceLoc(), name,
                                      importSourceLoc(param->getLocation()),
                                      bodyName, swiftParamTy, 
                                      ImportedHeaderUnit);
@@ -1451,10 +1468,10 @@ importFunctionType(const clang::FunctionDecl *clangDecl,
     auto paramTy =  BoundGenericType::get(SwiftContext.getArrayDecl(), Type(),
       {SwiftContext.getAnyDecl()->getDeclaredType()});
     auto name = SwiftContext.getIdentifier("varargs");
-    auto param = new (SwiftContext) ParamDecl(true, SourceLoc(),
-                                                Identifier(),
-                                                SourceLoc(), name, paramTy,
-                                                ImportedHeaderUnit);
+    auto param = new (SwiftContext) ParamDecl(true, SourceLoc(), SourceLoc(),
+                                              Identifier(),
+                                              SourceLoc(), name, paramTy,
+                                              ImportedHeaderUnit);
 
     param->setVariadic();
     parameters.push_back(param);
@@ -1477,40 +1494,6 @@ static bool isObjCMethodResultAudited(const clang::Decl *decl) {
   return (decl->hasAttr<clang::CFReturnsRetainedAttr>() ||
           decl->hasAttr<clang::CFReturnsNotRetainedAttr>() ||
           decl->hasAttr<clang::ObjCReturnsInnerPointerAttr>());
-}
-
-namespace {
-  struct ErrorImportInfo {
-    ForeignErrorConvention::Kind Kind;
-    ForeignErrorConvention::IsOwned_t IsOwned;
-    ForeignErrorConvention::IsReplaced_t ReplaceParamWithVoid;
-    unsigned ParamIndex;
-    CanType ParamType;
-    CanType OrigResultType;
-
-    ForeignErrorConvention asForeignErrorConvention() const {
-      assert(ParamType && "not fully initialized!");
-      using FEC = ForeignErrorConvention;
-      switch (Kind) {
-      case FEC::ZeroResult:
-        return FEC::getZeroResult(ParamIndex, IsOwned, ReplaceParamWithVoid,
-                                  ParamType, OrigResultType);
-      case FEC::NonZeroResult:
-        return FEC::getNonZeroResult(ParamIndex, IsOwned, ReplaceParamWithVoid,
-                                     ParamType, OrigResultType);
-      case FEC::ZeroPreservedResult:
-        return FEC::getZeroPreservedResult(ParamIndex, IsOwned,
-                                           ReplaceParamWithVoid, ParamType);
-      case FEC::NilResult:
-        return FEC::getNilResult(ParamIndex, IsOwned, ReplaceParamWithVoid,
-                                 ParamType);
-      case FEC::NonNilError:
-        return FEC::getNonNilError(ParamIndex, IsOwned, ReplaceParamWithVoid,
-                                   ParamType);
-      }
-      llvm_unreachable("bad error convention");
-    }
-  };
 }
 
 /// Determine whether this is the name of an Objective-C collection
@@ -1892,7 +1875,7 @@ DefaultArgumentKind ClangImporter::Implementation::inferDefaultArgument(
 
   // Option sets default to "[]" if they have "Options" in their name.
   if (const clang::EnumType *enumTy = type->getAs<clang::EnumType>())
-    if (classifyEnum(pp, enumTy->getDecl()) == EnumKind::Options) {
+    if (getEnumKind(enumTy->getDecl(), &pp) == EnumKind::Options) {
       auto enumName = enumTy->getDecl()->getName();
       for (auto word : reversed(camel_case::getWords(enumName))) {
         if (camel_case::sameWordIgnoreFirstCase(word, "options"))
@@ -2112,7 +2095,7 @@ Type ClangImporter::Implementation::importMethodType(
     // It doesn't actually matter which DeclContext we use, so just
     // use the imported header unit.
     auto type = TupleType::getEmpty(SwiftContext);
-    auto var = new (SwiftContext) ParamDecl(/*IsLet*/ true,
+    auto var = new (SwiftContext) ParamDecl(/*IsLet*/ true, SourceLoc(),
                                             SourceLoc(), argName,
                                             SourceLoc(), argName, type,
                                             ImportedHeaderUnit);
@@ -2224,8 +2207,8 @@ Type ClangImporter::Implementation::importMethodType(
     // It doesn't actually matter which DeclContext we use, so just use the
     // imported header unit.
     auto bodyVar
-      = createDeclWithClangNode<ParamDecl>(param,
-                                     /*IsLet*/ true, SourceLoc(), name,
+      = createDeclWithClangNode<ParamDecl>(param, /*IsLet*/ true,
+                                     SourceLoc(), SourceLoc(), name,
                                      importSourceLoc(param->getLocation()),
                                      bodyName, swiftParamTy, 
                                      ImportedHeaderUnit);

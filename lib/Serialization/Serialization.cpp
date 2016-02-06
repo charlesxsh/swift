@@ -429,6 +429,7 @@ void Serializer::writeBlockInfoBlock() {
   BLOCK_RECORD(options_block, XCC);
   BLOCK_RECORD(options_block, IS_SIB);
   BLOCK_RECORD(options_block, IS_TESTABLE);
+  BLOCK_RECORD(options_block, IS_RESILIENT);
 
   BLOCK(INPUT_BLOCK);
   BLOCK_RECORD(input_block, IMPORTED_MODULE);
@@ -540,6 +541,7 @@ void Serializer::writeDocBlockInfoBlock() {
 
   BLOCK(COMMENT_BLOCK);
   BLOCK_RECORD(comment_block, DECL_COMMENTS);
+  BLOCK_RECORD(comment_block, GROUP_NAMES);
 
 #undef BLOCK
 #undef BLOCK_RECORD
@@ -575,6 +577,11 @@ void Serializer::writeHeader(const SerializationOptions &options) {
       if (M->isTestingEnabled()) {
         options_block::IsTestableLayout IsTestable(Out);
         IsTestable.emit(ScratchRecord);
+      }
+
+      if (M->isResilienceEnabled()) {
+        options_block::IsResilientLayout IsResilient(Out);
+        IsResilient.emit(ScratchRecord);
       }
 
       if (options.SerializeOptionsForDebugging) {
@@ -921,6 +928,7 @@ static uint8_t getRawStableRequirementKind(RequirementKind kind) {
 
   switch (kind) {
   CASE(Conformance)
+  CASE(Superclass)
   CASE(SameType)
   CASE(WitnessMarker)
   }
@@ -973,7 +981,7 @@ bool Serializer::writeGenericParams(const GenericParamList *genericParams,
     llvm::raw_svector_ostream ReqOS(ReqStr);
     next.printAsWritten(ReqOS);
     switch (next.getKind()) {
-    case RequirementKind::Conformance:
+    case RequirementReprKind::TypeConstraint:
       GenericRequirementLayout::emitRecord(
                                       Out, ScratchRecord, abbrCode,
                                       GenericRequirementKind::Conformance,
@@ -981,16 +989,13 @@ bool Serializer::writeGenericParams(const GenericParamList *genericParams,
                                       addTypeRef(next.getConstraint()),
                                       ReqOS.str());
       break;
-    case RequirementKind::SameType:
+    case RequirementReprKind::SameType:
       GenericRequirementLayout::emitRecord(
                                       Out, ScratchRecord, abbrCode,
                                       GenericRequirementKind::SameType,
                                       addTypeRef(next.getFirstType()),
                                       addTypeRef(next.getSecondType()),
                                       ReqOS.str());
-      break;
-    case RequirementKind::WitnessMarker:
-      llvm_unreachable("Can't show up in requirement representations");
       break;
     }
   }
@@ -1188,12 +1193,8 @@ Serializer::writeSubstitutions(ArrayRef<Substitution> substitutions,
   using namespace decls_block;
   auto abbrCode = abbrCodes[BoundGenericSubstitutionLayout::Code];
   for (auto &sub : substitutions) {
-    SmallVector<DeclID, 16> conformanceData;
-    SmallVector<const ProtocolConformance *, 8> conformancesToWrite;
-
     BoundGenericSubstitutionLayout::emitRecord(
       Out, ScratchRecord, abbrCode,
-      addTypeRef(sub.getArchetype()),
       addTypeRef(sub.getReplacement()),
       sub.getConformances().size());
 
@@ -1727,6 +1728,30 @@ void Serializer::writeDeclAttribute(const DeclAttribute *DA) {
     return;
   }
 
+  case DAK_Swift3Migration: {
+    auto *theAttr = cast<Swift3MigrationAttr>(DA);
+
+    llvm::SmallString<32> blob;
+
+    unsigned renameLength = 0;
+    if (auto newName = theAttr->getRenamed()) {
+      llvm::raw_svector_ostream os(blob);
+      newName.print(os);
+      renameLength = os.str().size();
+    }
+
+    blob.append(theAttr->getMessage());
+
+    auto abbrCode = DeclTypeAbbrCodes[Swift3MigrationDeclAttrLayout::Code];
+    Swift3MigrationDeclAttrLayout::emitRecord(
+                                        Out, ScratchRecord, abbrCode,
+                                        theAttr->isImplicit(),
+                                        renameLength,
+                                        theAttr->getMessage().size(),
+                                        blob);
+    return;
+  }
+
   case DAK_WarnUnusedResult: {
     auto *theAttr = cast<WarnUnusedResultAttr>(DA);
 
@@ -1740,21 +1765,6 @@ void Serializer::writeDeclAttribute(const DeclAttribute *DA) {
                                                theAttr->isImplicit(),
                                                endOfMessageIndex,
                                                blob);
-    return;
-  }
-
-  case DAK_MigrationId: {
-    auto *theAttr = cast<MigrationIdAttr>(DA);
-
-    // Compute the blob.
-    SmallString<128> blob;
-    blob += theAttr->getIdent();
-    uint64_t endOfIdentIndex = blob.size();
-    blob += theAttr->getPatternId();
-    auto abbrCode = DeclTypeAbbrCodes[MigrationIdDeclAttrLayout::Code];
-    MigrationIdDeclAttrLayout::emitRecord(Out, ScratchRecord, abbrCode,
-                                          endOfIdentIndex,
-                                          blob);
     return;
   }
   }
@@ -3404,6 +3414,7 @@ namespace {
 struct DeclCommentTableData {
   StringRef Brief;
   RawComment Raw;
+  uint32_t Group;
 };
 
 class DeclCommentTableInfo {
@@ -3423,16 +3434,19 @@ public:
   std::pair<unsigned, unsigned>
   EmitKeyDataLength(raw_ostream &out, key_type_ref key, data_type_ref data) {
     uint32_t keyLength = key.size();
+    const unsigned numLen = 4;
 
     // Data consists of brief comment length and brief comment text,
-    uint32_t dataLength = 4 + data.Brief.size();
+    uint32_t dataLength = numLen + data.Brief.size();
     // number of raw comments,
-    dataLength += 4;
+    dataLength += numLen;
     // for each raw comment: column number of the first line, length of each
     // raw comment and its text.
     for (auto C : data.Raw.Comments)
-      dataLength += 4 + 4 + C.RawText.size();
+      dataLength += numLen + numLen + C.RawText.size();
 
+    // Group Id.
+    dataLength += numLen;
     endian::Writer<little> writer(out);
     writer.write<uint32_t>(keyLength);
     writer.write<uint32_t>(dataLength);
@@ -3454,19 +3468,81 @@ public:
       writer.write<uint32_t>(C.RawText.size());
       out << C.RawText;
     }
+    writer.write<uint32_t>(data.Group);
   }
 };
 
 } // end unnamed namespace
 
+class DeclGroupNameContext {
+  const bool Enable;
+  const std::string NullGroupName = "";
+  llvm::StringMap<unsigned> Map;
+  std::vector<StringRef> ViewBuffer;
+
+  StringRef getDeclGroupName(const ValueDecl *VD) {
+    if (!Enable)
+      return NullGroupName;
+    auto PathOp = VD-> getDeclContext()->getParentSourceFile()->getBufferID();
+    if (!PathOp.hasValue())
+      return NullGroupName;
+    // FIXME: Collect group name from better places.
+    StringRef FullPath(VD->getASTContext().SourceMgr.
+      getIdentifierForBuffer(PathOp.getValue()));
+    return llvm::sys::path::stem(FullPath);
+  }
+
+public:
+  DeclGroupNameContext(bool Enable) : Enable(Enable) {}
+  uint32_t getGroupSequence(const ValueDecl *VD) {
+    auto Name = getDeclGroupName(VD);
+    if (Map.count(Name) == 0) {
+      Map[Name] = Map.size();
+    }
+    return Map[Name];
+  }
+
+  ArrayRef<StringRef> getOrderedGroupNames() {
+    ViewBuffer.clear();
+    for(auto It = Map.begin(); It != Map.end(); ++ It) {
+      ViewBuffer.push_back(It->first());
+    }
+    std::sort(ViewBuffer.begin(), ViewBuffer.end(),
+              [&](StringRef L, StringRef R) {
+                return Map[L] < Map[R];
+              });
+    return llvm::makeArrayRef(ViewBuffer);
+  }
+};
+
+static void writeGroupNames(const comment_block::GroupNamesLayout &GroupNames,
+                            ArrayRef<StringRef> Names) {
+  llvm::SmallString<32> Blob;
+  llvm::raw_svector_ostream BlobStream(Blob);
+  endian::Writer<little> Writer(BlobStream);
+  Writer.write<uint32_t>(Names.size());
+  for (auto N : Names) {
+    Writer.write<uint32_t>(N.size());
+    BlobStream << N;
+  }
+  BlobStream.str();
+  SmallVector<uint64_t, 8> Scratch;
+  GroupNames.emit(Scratch, Blob);
+}
+
 static void writeDeclCommentTable(
     const comment_block::DeclCommentListLayout &DeclCommentList,
-    const SourceFile *SF, const Module *M) {
+    const SourceFile *SF, const Module *M,
+    DeclGroupNameContext &GroupContext) {
 
   struct DeclCommentTableWriter : public ASTWalker {
     llvm::BumpPtrAllocator Arena;
     llvm::SmallString<512> USRBuffer;
     llvm::OnDiskChainedHashTableGenerator<DeclCommentTableInfo> generator;
+    DeclGroupNameContext &GroupContext;
+
+    DeclCommentTableWriter(DeclGroupNameContext &GroupContext) :
+      GroupContext(GroupContext) {}
 
     StringRef copyString(StringRef String) {
       char *Mem = static_cast<char *>(Arena.Allocate(String.size(), 1));
@@ -3493,12 +3569,13 @@ static void writeDeclCommentTable(
       }
 
       generator.insert(copyString(USRBuffer.str()),
-                       { VD->getBriefComment(), Raw });
+                       { VD->getBriefComment(), Raw,
+                         GroupContext.getGroupSequence(VD) });
       return true;
     }
   };
 
-  DeclCommentTableWriter Writer;
+  DeclCommentTableWriter Writer(GroupContext);
 
   ArrayRef<const FileUnit *> files = SF ? SF : M->getFiles();
   for (auto nextFile : files)
@@ -3687,6 +3764,18 @@ void Serializer::writeAST(ModuleOrSourceFile DC) {
           .push_back({ getStableFixity(OD->getKind()), addDeclRef(D) });
       }
 
+      // If this is a global variable, force the accessors to be
+      // serialized.
+      if (auto VD = dyn_cast<VarDecl>(D)) {
+        if (VD->getGetter())
+          addDeclRef(VD->getGetter());
+        if (VD->getSetter())
+          addDeclRef(VD->getSetter());
+      }
+
+      // If this nominal type has associated top-level decls for a
+      // derived conformance (for example, ==), force them to be
+      // serialized.
       if (auto IDC = dyn_cast<IterableDeclContext>(D)) {
         addOperatorsAndTopLevel(*this, IDC->getMembers(),
                                 operatorMethodDecls, topLevelDecls,
@@ -3791,9 +3880,16 @@ void Serializer::writeToStream(raw_ostream &os, ModuleOrSourceFile DC,
   S.writeToStream(os);
 }
 
+static bool isStdlibModule(ModuleOrSourceFile DC) {
+  if (auto M = DC.dyn_cast<ModuleDecl*>()) {
+    return M->isStdlibModule();
+  }
+  return false;
+}
+
 void Serializer::writeDocToStream(raw_ostream &os, ModuleOrSourceFile DC) {
   Serializer S{MODULE_DOC_SIGNATURE, DC};
-
+  bool isStdlib = isStdlibModule(DC);
   // FIXME: This is only really needed for debugging. We don't actually use it.
   S.writeDocBlockInfoBlock();
 
@@ -3802,9 +3898,13 @@ void Serializer::writeDocToStream(raw_ostream &os, ModuleOrSourceFile DC) {
     S.writeDocHeader();
     {
       BCBlockRAII restoreBlock(S.Out, COMMENT_BLOCK_ID, 4);
-
+      DeclGroupNameContext GroupContext(isStdlib);
       comment_block::DeclCommentListLayout DeclCommentList(S.Out);
-      writeDeclCommentTable(DeclCommentList, S.SF, S.M);
+      writeDeclCommentTable(DeclCommentList, S.SF, S.M, GroupContext);
+      comment_block::GroupNamesLayout GroupNames(S.Out);
+
+      // FIXME: Multi-file compilation may cause group id collision.
+      writeGroupNames(GroupNames, GroupContext.getOrderedGroupNames());
     }
   }
 

@@ -13,34 +13,122 @@
 // Problem
 // =======
 //
-// In practice it has turned out that every one of our concrete
-// collection's non random-access indices holds a reference to the
-// collection it traverses.  This introduces complexity in
-// implementations (especially as we try to avoid multiple-reference
-// effects that can cause unnecessary COW copies -- see `Dictionary`
-// and `Set`) and presumably translates into less-efficient codegen.
-// We should consider other schemes.
+// Swift standard library defines three kinds of collection indices:
+// forward, bidirectional and random access.  A collection uses one of
+// these indices based on the capabilities of the backing data
+// structure.  For example, a singly-linked list can only have forward
+// indices, a tree with parent pointers has bidirectional indices, and
+// Array and Deque has random access indices.
 //
-// Solution
-// ========
+// It turned out that in practice, every one of the non-random-access
+// indices holds a reference to the collection it traverses, or to
+// some part of it, to implement `.successor()` and `.predecessor()`.
+// This introduces extra complexity in implementations and presumably
+// translates into less-efficient code that does reference counting on
+// indices.  Indices referencing collections also conflicts with COW
+// -- a live index makes a collection non-uniquely referenced, causing
+// unnecessary copies (see `Dictionary` and `Set`, that have to use a
+// double-indirection trick to avoid these extra copies).  We should
+// consider other schemes that don't require these tricks.
+//
+// Eliminating all reference-countable members from indices implies that
+// indices need to essentially encode the path to the element within the data
+// structure.  Since one is free to choose the encoding, we think that it
+// should be possible to choose it in such a way that indices are cheaply
+// comparable.
+//
+// In this new model, indices don't have any method or property
+// requirements (these APIs were moved to Collection), so index
+// protocols were eliminated.  Instead, we are introducing
+// `CollectionType`, `BidirectionalCollectionType` and
+// `RandomAccessCollectionType`.  These protocols naturally compose
+// with `MutableCollectionType` and `RangeReplaceableCollectionType`:
+//
+//     protocol SequenceType {}
+//     protocol CollectionType : SequenceType {}
+//
+//       protocol MutableCollectionType : CollectionType {}
+//       protocol RangeReplaceableCollectionType : CollectionType {}
+//
+//       protocol BidirectionalCollectionType : CollectionType {}
+//         protocol RandomAccessCollectionType : BidirectionalCollectionType {}
+//
+// Proposed Solution
+// =================
 //
 // Change indices so that they can't be moved forward or backward by
-// themselves (`i.successor()`).  Then indices can store the minimal
-// amount of information about the element position in the collection,
-// and avoid keeping a reference to the whole collection.
+// themselves (`i.successor()` is not allowed).  Then indices can
+// store the minimal amount of information only about the element
+// position in the collection.  Usually index can be represented as
+// one or a couple of integers that encode the "path" in the
+// data structure from the root to the element.  In this
+// representation, only a collection can move indices (e.g.,
+// `c.next(i)`).
+//
+// Advantages:
+// * indices don't need to keep a reference to the collection.
+//   - indices are simpler to implement.
+//   - indices are not reference-countable, and thus cheaper to
+//     handle.
+// * the hierarchy of index protocols is removed, and instead we add
+//   protocols for forward, bidirectional and random-access
+//   collections.  This is closer to how people generally talk about
+//   collections.  Writing a generic constraint for bidirectional and
+//   random-access collections becomes simpler.
+//
+// Disadvantages:
+// * a value-typed linked list can't conform to CollectionType.  A
+//   reference-typed one can.
+
+// Issues
+// ======
+//
+// 1. Conflicting requirements for `MyRange`:
+//
+// * range bounds need to be comparable and incrementable, in order for
+//   `MyRange` to conform to `MyForwardCollectionType`,
+//
+// * we frequently want to use `MyRange` as a "transport" data type, just
+//   to carry a pair of indices around.  Indices are neither comparable nor
+//   incrementable.
+//
+// Possible solution: conditional conformance for `MyRange` to
+// `MyForwardCollectionType` when the bounds are comparable and
+// incrementable (when the bounds conform to
+// `MyRandomAccessCollectionType`?).
+//
+// 2. We can't specify constraints on associated types.  This forces many
+//    trivial algorithms to specify useless constraints.
+
+infix operator  ...* { associativity none precedence 135 }
+infix operator  ..<* { associativity none precedence 135 }
 
 public protocol MyGeneratorType {
-  typealias Element
+  associatedtype Element
   mutating func next() -> Element?
 }
 public protocol MySequenceType {
-  typealias Generator : MyGeneratorType
-  typealias SubSequence /* : MySequenceType */
+  associatedtype Generator : MyGeneratorType
+  associatedtype SubSequence /* : MySequenceType */
+
   func generate() -> Generator
+
   @warn_unused_result
   func map<T>(
     @noescape transform: (Generator.Element) throws -> T
   ) rethrows -> [T]
+
+  @warn_unused_result
+  func dropFirst(n: Int) -> SubSequence
+
+  @warn_unused_result
+  func dropLast(n: Int) -> SubSequence
+
+  @warn_unused_result
+  func prefix(maxLength: Int) -> SubSequence
+
+  @warn_unused_result
+  func suffix(maxLength: Int) -> SubSequence
 }
 extension MySequenceType {
   @warn_unused_result
@@ -52,6 +140,30 @@ extension MySequenceType {
       result.append(try transform(element))
     }
     return result
+  }
+
+  @warn_unused_result
+  public func dropFirst(n: Int) -> SubSequence {
+    _precondition(n >= 0, "Can't drop a negative number of elements from a collection")
+    fatalError("implement")
+  }
+
+  @warn_unused_result
+  public func dropLast(n: Int) -> SubSequence {
+    _precondition(n >= 0, "Can't drop a negative number of elements from a collection")
+    fatalError("implement")
+  }
+
+  @warn_unused_result
+  public func prefix(maxLength: Int) -> SubSequence {
+    _precondition(maxLength >= 0, "Can't take a prefix of negative length from a collection")
+    fatalError("implement")
+  }
+
+  @warn_unused_result
+  public func suffix(maxLength: Int) -> SubSequence {
+    _precondition(maxLength >= 0, "Can't take a suffix of negative length from a collection")
+    fatalError("implement")
   }
 }
 
@@ -82,9 +194,9 @@ struct OldGenerator<G : MyGeneratorType> : GeneratorType {
 //------------------------------------------------------------------------
 
 public protocol MyIndexableType {
-  typealias Index : MyIndexType
-  typealias _Element
-  typealias UnownedHandle
+  associatedtype Index : Comparable
+  associatedtype _Element
+  associatedtype UnownedHandle
   var startIndex: Index { get }
   var endIndex: Index { get }
   subscript(i: Index) -> _Element { get }
@@ -110,15 +222,16 @@ extension MyIndexableType {
 }
 
 public protocol MyForwardCollectionType : MySequenceType, MyIndexableType {
-  typealias Generator = DefaultGenerator<Self>
-  typealias Index : MyIndexType
-  typealias SubSequence : MySequenceType /* : MyForwardCollectionType */
+  associatedtype Generator = DefaultGenerator<Self>
+  associatedtype Index : Comparable
+  associatedtype SubSequence : MySequenceType /* : MyForwardCollectionType */
     = MySlice<Self>
-  typealias UnownedHandle = Self // DefaultUnownedForwardCollection<Self>
-  typealias IndexRange : MyIndexRangeType, MySequenceType, MyIndexableType /* : MyForwardCollectionType */
+  associatedtype UnownedHandle = Self // DefaultUnownedForwardCollection<Self>
+  associatedtype IndexRange : MyIndexRangeType, MySequenceType, MyIndexableType /* : MyForwardCollectionType */
     // FIXME: where IndexRange.Generator.Element == Index
     // FIXME: where IndexRange.Index == Index
     = DefaultForwardIndexRange<Self>
+  associatedtype IndexDistance : SignedIntegerType = Int
 
   var startIndex: Index { get }
   var endIndex: Index { get }
@@ -132,13 +245,13 @@ public protocol MyForwardCollectionType : MySequenceType, MyIndexableType {
   func next(i: Index) -> Index
 
   @warn_unused_result
-  func advance(i: Index, by: Index.Distance) -> Index
+  func advance(i: Index, by: IndexDistance) -> Index
 
   @warn_unused_result
-  func advance(i: Index, by: Index.Distance, limit: Index) -> Index
+  func advance(i: Index, by: IndexDistance, limit: Index) -> Index
 
   @warn_unused_result
-  func distanceFrom(start: Index, to: Index) -> Index.Distance
+  func distanceFrom(start: Index, to: Index) -> IndexDistance
 
   func _failEarlyRangeCheck(index: Index, bounds: MyRange<Index>)
 
@@ -154,31 +267,19 @@ public protocol MyForwardCollectionType : MySequenceType, MyIndexableType {
 
   var isEmpty: Bool { get }
 
-  var count: Index.Distance { get }
-}
-extension MyForwardCollectionType
-  // FIXME: this constraint shouldn't be necessary.
-  where IndexRange.Index == Index
-  {
-
-  // FIXME: do we want this overload?  Would we provide such an overload
-  // for every method that accepts ranges of indices?
-  // FIXME: can we have a generic subscript on MyIndexRangeType instead?
-  public subscript(bounds: IndexRange) -> SubSequence {
-    return self[MyRange(start: bounds.startIndex, end: bounds.endIndex)]
-  }
+  var count: IndexDistance { get }
 }
 
 extension MyForwardCollectionType {
   /// Do not use this method directly; call advancedBy(n) instead.
   @inline(__always)
   @warn_unused_result
-  internal func _advanceForward(i: Index, by n: Index.Distance) -> Index {
+  internal func _advanceForward(i: Index, by n: IndexDistance) -> Index {
     _precondition(n >= 0,
       "Only BidirectionalIndexType can be advanced by a negative amount")
 
     var i = i
-    for var offset: Index.Distance = 0; offset != n; offset = offset + 1 {
+    for var offset: IndexDistance = 0; offset != n; offset = offset + 1 {
       _nextInPlace(&i)
     }
     return i
@@ -188,32 +289,32 @@ extension MyForwardCollectionType {
   @inline(__always)
   @warn_unused_result
   internal func _advanceForward(
-    i: Index, by n: Index.Distance, limit: Index
+    i: Index, by n: IndexDistance, limit: Index
   ) -> Index {
     _precondition(n >= 0,
       "Only BidirectionalIndexType can be advanced by a negative amount")
 
     var i = i
-    for var offset: Index.Distance = 0; offset != n && i != limit; offset = offset + 1 {
+    for var offset: IndexDistance = 0; offset != n && i != limit; offset = offset + 1 {
       _nextInPlace(&i)
     }
     return i
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance) -> Index {
+  public func advance(i: Index, by n: IndexDistance) -> Index {
     return self._advanceForward(i, by: n)
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance, limit: Index) -> Index {
+  public func advance(i: Index, by n: IndexDistance, limit: Index) -> Index {
     return self._advanceForward(i, by: n, limit: limit)
   }
 
   @warn_unused_result
-  public func distanceFrom(start: Index, to end: Index) -> Index.Distance {
+  public func distanceFrom(start: Index, to end: Index) -> IndexDistance {
     var start = start
-    var count: Index.Distance = 0
+    var count: IndexDistance = 0
     while start != end {
       count = count + 1
       _nextInPlace(&start)
@@ -247,8 +348,41 @@ extension MyForwardCollectionType {
     return startIndex == endIndex
   }
 
-  public var count: Index.Distance {
+  public var count: IndexDistance {
     return distanceFrom(startIndex, to: endIndex)
+  }
+
+  @warn_unused_result
+  public func dropFirst(n: Int) -> SubSequence {
+    _precondition(n >= 0, "Can't drop a negative number of elements from a collection")
+/*
+    let start = advance(startIndex, by: numericCast(n), limit: endIndex)
+    return self[start..<endIndex]
+*/
+    fatalError()
+  }
+
+  @warn_unused_result
+  public func dropLast(n: Int) -> SubSequence {
+    _precondition(n >= 0, "Can't drop a negative number of elements from a collection")
+    let amount = max(0, numericCast(count) - n)
+    let end = advance(startIndex, by: numericCast(amount), limit: endIndex)
+    return self[startIndex..<*end]
+  }
+
+  @warn_unused_result
+  public func prefix(maxLength: Int) -> SubSequence {
+    _precondition(maxLength >= 0, "Can't take a prefix of negative length from a collection")
+    let end = advance(startIndex, by: numericCast(maxLength), limit: endIndex)
+    return self[startIndex..<*end]
+  }
+
+  @warn_unused_result
+  public func suffix(maxLength: Int) -> SubSequence {
+    _precondition(maxLength >= 0, "Can't take a suffix of negative length from a collection")
+    let amount = max(0, numericCast(count) - maxLength)
+    let start = advance(startIndex, by: numericCast(amount), limit: endIndex)
+    return self[start..<*endIndex]
   }
 }
 extension MyForwardCollectionType
@@ -287,7 +421,9 @@ extension MyForwardCollectionType
   }
 }
 extension MyForwardCollectionType
-  where Index : MyRandomAccessIndex {
+  where
+  Index : MyStrideable,
+  Index.Distance == IndexDistance {
 
   @warn_unused_result
   public func next(i: Index) -> Index {
@@ -295,14 +431,14 @@ extension MyForwardCollectionType
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance) -> Index {
+  public func advance(i: Index, by n: IndexDistance) -> Index {
     _precondition(n >= 0,
       "Can't advance an Index of MyForwardCollectionType by a negative amount")
     return i.advancedBy(n)
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance, limit: Index) -> Index {
+  public func advance(i: Index, by n: IndexDistance, limit: Index) -> Index {
     _precondition(n >= 0,
       "Can't advance an Index of MyForwardCollectionType by a negative amount")
     let d = i.distanceTo(limit)
@@ -371,24 +507,24 @@ extension MyBidirectionalCollectionType {
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance) -> Index {
+  public func advance(i: Index, by n: IndexDistance) -> Index {
     if n >= 0 {
       return _advanceForward(i, by: n)
     }
     var i = i
-    for var offset: Index.Distance = n; offset != 0; offset = offset + 1 {
+    for var offset: IndexDistance = n; offset != 0; offset = offset + 1 {
       _previousInPlace(&i)
     }
     return i
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance, limit: Index) -> Index {
+  public func advance(i: Index, by n: IndexDistance, limit: Index) -> Index {
     if n >= 0 {
       return _advanceForward(i, by: n, limit: limit)
     }
     var i = i
-    for var offset: Index.Distance = n; offset != 0 && i != limit;
+    for var offset: IndexDistance = n; offset != 0 && i != limit;
         offset = offset + 1 {
       _previousInPlace(&i)
     }
@@ -396,7 +532,9 @@ extension MyBidirectionalCollectionType {
   }
 }
 extension MyBidirectionalCollectionType
-  where Index : MyRandomAccessIndex {
+  where
+  Index : MyStrideable,
+  Index.Distance == IndexDistance {
 
   @warn_unused_result
   public func previous(i: Index) -> Index {
@@ -404,12 +542,12 @@ extension MyBidirectionalCollectionType
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance) -> Index {
+  public func advance(i: Index, by n: IndexDistance) -> Index {
     return i.advancedBy(n)
   }
 
   @warn_unused_result
-  public func advance(i: Index, by n: Index.Distance, limit: Index) -> Index {
+  public func advance(i: Index, by n: IndexDistance, limit: Index) -> Index {
     let d = i.distanceTo(limit)
     if d == 0 || (d > 0 ? d <= n : d >= n) {
       return limit
@@ -419,7 +557,8 @@ extension MyBidirectionalCollectionType
 }
 
 public protocol MyRandomAccessCollectionType : MyBidirectionalCollectionType {
-  typealias Index : MyRandomAccessIndex
+  associatedtype Index : MyStrideable
+    // FIXME: where Index.Distance == IndexDistance
 }
 
 public struct DefaultUnownedForwardCollection<Collection : MyForwardCollectionType> {
@@ -442,6 +581,16 @@ public struct DefaultForwardIndexRange<Collection : MyIndexableType /* MyForward
   public typealias Index = Collection.Index
   public typealias SubSequence = DefaultForwardIndexRange<Collection>
   public typealias UnownedHandle = DefaultForwardIndexRange<Collection>
+
+  internal init(
+    _unownedCollection: Collection.UnownedHandle,
+    startIndex: Collection.Index,
+    endIndex: Collection.Index
+  ) {
+    self._unownedCollection = _unownedCollection
+    self.startIndex = startIndex
+    self.endIndex = endIndex
+  }
 
   public init(
     collection: Collection,
@@ -511,11 +660,12 @@ public struct DefaultForwardIndexRangeGenerator<Collection : MyIndexableType /* 
   }
 }
 
-public struct MyRange<Index : MyIndexType> : MyIndexRangeType {
+public struct MyRange<Index : Comparable> : MyIndexRangeType {
   public let startIndex: Index
   public let endIndex: Index
 
   public init(start: Index, end: Index) {
+    _precondition(start <= end, "Can't form a backwards MyRange")
     self.startIndex = start
     self.endIndex = end
   }
@@ -523,6 +673,48 @@ public struct MyRange<Index : MyIndexType> : MyIndexRangeType {
   public subscript(i: Index) -> Index {
     return i
   }
+}
+
+public func ..<*
+  <Index : Comparable>(lhs: Index, rhs: Index) -> MyRange<Index> {
+  return MyRange(start: lhs, end: rhs)
+}
+
+// FIXME: replace this type with a conditional conformance on MyRange.
+public struct MyIterableRange<Index : MyStrideable> :
+  MyBidirectionalCollectionType {
+
+  public let startIndex: Index
+  public let endIndex: Index
+
+  public init(start: Index, end: Index) {
+    _precondition(start <= end, "Can't form a backwards MyIterableRange")
+    self.startIndex = start
+    self.endIndex = end
+  }
+
+  @warn_unused_result
+  public func next(i: Index) -> Index {
+    let result = i.advancedBy(1)
+    _precondition(startIndex <= result, "can't advance past endIndex")
+    return i.advancedBy(1)
+  }
+
+  @warn_unused_result
+  public func previous(i: Index) -> Index {
+    let result = i.advancedBy(-1)
+    _precondition(result <= endIndex, "can't advance before startIndex")
+    return result
+  }
+
+  public subscript(i: Index) -> Index {
+    return i
+  }
+}
+
+public func ..<*
+  <Index : MyStrideable>(lhs: Index, rhs: Index) -> MyIterableRange<Index> {
+  return MyIterableRange(start: lhs, end: rhs)
 }
 
 // FIXME: in order for all this to be usable, we need to unify MyRange and
@@ -610,6 +802,16 @@ public struct MySliceIndexRange<Collection : MyIndexableType /* MyForwardCollect
   public typealias Index = Collection.Index
   public typealias SubSequence = MySliceIndexRange<Collection>
   public typealias UnownedHandle = MySliceIndexRange<Collection>
+
+  internal init(
+    _unownedCollection: Collection.UnownedHandle,
+    startIndex: Collection.Index,
+    endIndex: Collection.Index
+  ) {
+    self._unownedCollection = _unownedCollection
+    self.startIndex = startIndex
+    self.endIndex = endIndex
+  }
 
   public init(
     collection: Collection,
@@ -700,16 +902,12 @@ public struct DefaultGenerator<Collection : MyIndexableType>
   }
 }
 public protocol MyMutableCollectionType : MyForwardCollectionType {
-  typealias SubSequence : MyForwardCollectionType = MyMutableSlice<Self>
+  associatedtype SubSequence : MyForwardCollectionType = MyMutableSlice<Self>
   subscript(i: Index) -> Generator.Element { get set }
 }
 
-public protocol MyIndexType : Equatable {
-  // Move to CollectionType?
-  typealias Distance : SignedIntegerType = Int
-}
 public protocol MyIndexRangeType : Equatable {
-  typealias Index : MyIndexType
+  associatedtype Index : Equatable
   var startIndex: Index { get }
   var endIndex: Index { get }
 }
@@ -775,10 +973,93 @@ extension MyRandomAccessIndexType {
   }
 }
 */
+
+//------------------------------------------------------------------------
+// Bubble sort
+
+extension MyMutableCollectionType
+  where
+  IndexRange.Generator.Element == Index,
+  IndexRange.Index == Index
+{
+  public mutating func bubbleSortInPlace(
+    @noescape isOrderedBefore: (Generator.Element, Generator.Element) -> Bool
+  ) {
+    if isEmpty { return }
+    if next(startIndex) == endIndex { return }
+
+    while true {
+      var swapped = false
+      for i in OldSequence(indices) {
+        if i == endIndex { break }
+        let ni = next(i)
+        if ni == endIndex { break }
+        if isOrderedBefore(self[ni], self[i]) {
+          swap(&self[i], &self[ni])
+          swapped = true
+        }
+      }
+      if !swapped {
+        break
+      }
+    }
+  }
+}
+
+extension MyMutableCollectionType
+  where
+  Generator.Element : Comparable,
+  IndexRange.Generator.Element == Index,
+  IndexRange.Index == Index
+{
+  public mutating func bubbleSortInPlace() {
+    bubbleSortInPlace { $0 < $1 }
+  }
+}
+
+//------------------------------------------------------------------------
+// Bubble sort
+
+extension MyRandomAccessCollectionType
+  where
+  IndexRange.Generator.Element == Index,
+  IndexRange.Index == Index
+{
+  public func lowerBoundOf(
+    element: Generator.Element,
+    @noescape isOrderedBefore: (Generator.Element, Generator.Element) -> Bool
+  ) -> Index {
+    var low = startIndex
+    var subrangeCount = count
+    while subrangeCount != 0 {
+      let midOffset = subrangeCount / 2
+      let mid = advance(low, by: midOffset)
+      if isOrderedBefore(self[mid], element) {
+        low = next(mid)
+        subrangeCount -= midOffset + 1
+      } else {
+        subrangeCount = midOffset
+      }
+    }
+    return low
+  }
+}
+
+extension MyRandomAccessCollectionType
+  where
+  Generator.Element : Comparable,
+  IndexRange.Generator.Element == Index,
+  IndexRange.Index == Index
+{
+  public func lowerBoundOf(element: Generator.Element) -> Index {
+    return lowerBoundOf(element) { $0 < $1 }
+  }
+}
+
 //------------
 
 public protocol MyStrideable : Comparable {
-  typealias Distance : SignedNumberType
+  associatedtype Distance : SignedNumberType
 
   @warn_unused_result
   func distanceTo(other: Self) -> Distance
@@ -787,16 +1068,16 @@ public protocol MyStrideable : Comparable {
   func advancedBy(n: Distance) -> Self
 }
 
-public protocol MyRandomAccessIndex : MyIndexType, MyStrideable {}
-
-extension Int : MyIndexType {}
 extension Int : MyStrideable {}
-extension Int : MyRandomAccessIndex {}
 
 //------------------------------------------------------------------------
 // Array
 
-public struct MyArray<Element> : MyForwardCollectionType {
+public struct MyArray<Element> :
+  MyForwardCollectionType,
+  MyRandomAccessCollectionType,
+  MyMutableCollectionType
+{
   internal var _elements: [Element] = []
 
   init() {}
@@ -811,7 +1092,12 @@ public struct MyArray<Element> : MyForwardCollectionType {
     return _elements.endIndex
   }
   public subscript(i: Int) -> Element {
-    return _elements[i]
+    get {
+      return _elements[i]
+    }
+    set {
+      _elements[i] = newValue
+    }
   }
 }
 
@@ -843,7 +1129,7 @@ public struct MySimplestForwardCollection<Element> : MyForwardCollectionType {
   }
 }
 
-public struct MySimplestForwardCollectionIndex : MyIndexType {
+public struct MySimplestForwardCollectionIndex : Comparable {
   internal let _index: Int
   internal init(_ index: Int) {
     self._index = index
@@ -855,6 +1141,13 @@ public func == (
   rhs: MySimplestForwardCollectionIndex
 ) -> Bool {
   return lhs._index == rhs._index
+}
+
+public func < (
+  lhs: MySimplestForwardCollectionIndex,
+  rhs: MySimplestForwardCollectionIndex
+) -> Bool {
+  return lhs._index < rhs._index
 }
 
 //------------------------------------------------------------------------
@@ -890,7 +1183,7 @@ public struct MySimplestBidirectionalCollection<Element> : MyBidirectionalCollec
   }
 }
 
-public struct MySimplestBidirectionalCollectionIndex : MyIndexType {
+public struct MySimplestBidirectionalCollectionIndex : Comparable {
   internal let _index: Int
   internal init(_ index: Int) {
     self._index = index
@@ -902,6 +1195,13 @@ public func == (
   rhs: MySimplestBidirectionalCollectionIndex
 ) -> Bool {
   return lhs._index == rhs._index
+}
+
+public func < (
+  lhs: MySimplestBidirectionalCollectionIndex,
+  rhs: MySimplestBidirectionalCollectionIndex
+) -> Bool {
+  return lhs._index < rhs._index
 }
 
 //------------------------------------------------------------------------
@@ -930,7 +1230,7 @@ public struct MySimplestRandomAccessCollection<Element> : MyRandomAccessCollecti
   }
 }
 
-public struct MySimplestRandomAccessCollectionIndex : MyRandomAccessIndex {
+public struct MySimplestRandomAccessCollectionIndex : MyStrideable {
   internal let _index: Int
   internal init(_ index: Int) {
     self._index = index
@@ -962,6 +1262,40 @@ public func < (
 }
 
 //------------------------------------------------------------------------
+// Simplest Strideable
+
+public struct MySimplestStrideable : MyStrideable {
+  internal let _value: Int
+  internal init(_ value: Int) {
+    self._value = value
+  }
+
+  @warn_unused_result
+  public func distanceTo(other: MySimplestStrideable) -> Int {
+    return _value.distanceTo(other._value)
+  }
+
+  @warn_unused_result
+  public func advancedBy(n: Int) -> MySimplestStrideable {
+    return MySimplestStrideable(_value.advancedBy(n))
+  }
+}
+
+public func == (
+  lhs: MySimplestStrideable,
+  rhs: MySimplestStrideable
+) -> Bool {
+  return lhs._value == rhs._value
+}
+
+public func < (
+  lhs: MySimplestStrideable,
+  rhs: MySimplestStrideable
+) -> Bool {
+  return lhs._value < rhs._value
+}
+
+//------------------------------------------------------------------------
 
 // FIXME: how does AnyCollection look like in the new scheme?
 
@@ -982,6 +1316,29 @@ NewCollection.test("indexOf") {
   expectEmpty(MyArray([1,2,3]).indexOf(42))
 }
 
+NewCollection.test("bubbleSortInPlace") {
+  var a = MyArray([4,3,2,1])
+  a.bubbleSortInPlace()
+  expectEqual([1,2,3,4], a._elements)
+}
+
+NewCollection.test("lowerBoundOf/empty") {
+  var a = MyArray<Int>([])
+  expectEqual(0, a.lowerBoundOf(3))
+}
+
+NewCollection.test("lowerBoundOf/one") {
+  var a = MyArray<Int>([10])
+  expectEqual(0, a.lowerBoundOf(9))
+  expectEqual(0, a.lowerBoundOf(10))
+  expectEqual(1, a.lowerBoundOf(11))
+}
+
+NewCollection.test("lowerBoundOf") {
+  var a = MyArray([1,2,2,3,3,3,3,3,3,3,3,4,5,6,7])
+  expectEqual(3, a.lowerBoundOf(3))
+}
+
 NewCollection.test("first") {
   expectOptionalEqual(1, MyArray([1,2,3]).first)
   expectEmpty(MyArray<Int>().first)
@@ -999,12 +1356,25 @@ NewCollection.test("isEmpty") {
 
 NewCollection.test("popFirst") {
   let c = MyArray([1,2,3])
-  var s0 = c[c.indices]
+  var s0 = c[c.startIndex..<*c.endIndex]
   var s = c[MyRange(start: c.startIndex, end: c.endIndex)]
   expectOptionalEqual(1, s.popFirst())
   expectOptionalEqual(2, s.popFirst())
   expectOptionalEqual(3, s.popFirst())
   expectEmpty(s.popFirst())
+}
+
+NewCollection.test("RangeLiterals") {
+  let comparable = MinimalComparableValue(0)
+  let strideable = MySimplestStrideable(0)
+
+  var comparableRange = comparable..<*comparable
+  expectType(MyRange<MinimalComparableValue>.self, &comparableRange)
+
+  var strideableRange = strideable..<*strideable
+  expectType(MyIterableRange<MySimplestStrideable>.self, &strideableRange)
+
+  for _ in OldSequence(0..<*10) {}
 }
 
 runAllTests()

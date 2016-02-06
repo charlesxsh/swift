@@ -12,11 +12,13 @@ add_swift_library(swiftClangImporter
   ClangDiagnosticConsumer.cpp
   ClangImporter.cpp
   ImportDecl.cpp
+  ImportEnumInfo.cpp
   ImportMacro.cpp
   ImportType.cpp
   SwiftLookupTable.cpp
   LINK_LIBRARIES
     swiftAST
+    swiftParse
 )
 
 

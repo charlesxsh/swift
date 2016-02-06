@@ -241,6 +241,16 @@ namespace swift {
     /// unchanged.
     StringRef toLowercaseWord(StringRef string, StringScratchSpace &scratch);
 
+    /// Lowercase the first word within the given camelCase string.
+    ///
+    /// \param string The string to lowercase.
+    /// \param scratch Scratch buffer used to form the resulting string.
+    ///
+    /// \returns the string with the first word lowercased, including
+    /// initialisms.
+    StringRef toLowercaseInitialisms(StringRef string,
+                                     StringScratchSpace &scratch);
+
     /// Sentence-case the given camelCase string by turning the first
     /// letter into an uppercase letter.
     ///
@@ -284,6 +294,10 @@ namespace swift {
 enum class NameRole {
   /// The base name of a function or method.
   BaseName,
+
+  /// The base name of a method where the omission type name is the
+  /// 'self' type.
+  BaseNameSelf,
 
   /// The first parameter of a function or method.
   FirstParameter,

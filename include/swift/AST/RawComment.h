@@ -1,4 +1,4 @@
-//===--- RawComment.h - Extraction of raw comments ------------------------===//
+//===--- RawComment.h - Extraction of raw comments --------------*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -72,6 +72,7 @@ struct RawComment {
 struct BriefAndRawComment {
   StringRef Brief;
   RawComment Raw;
+  uint32_t Group;
 };
 
 } // namespace swift

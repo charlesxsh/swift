@@ -338,7 +338,8 @@ void SourceLookupCache::invalidate() {
 
 ModuleDecl::ModuleDecl(Identifier name, ASTContext &ctx)
   : TypeDecl(DeclKind::Module, &ctx, name, SourceLoc(), { }),
-    DeclContext(DeclContextKind::Module, nullptr) {
+    DeclContext(DeclContextKind::Module, nullptr),
+    Flags({0, 0, 0}), DSOHandle(nullptr) {
   ctx.addDestructorCleanup(*this);
   setImplicit();
   setType(ModuleType::get(this));
@@ -399,8 +400,8 @@ DerivedFileUnit &Module::getDerivedFileUnit() const {
 }
 
 VarDecl *Module::getDSOHandle() {
-  if (DSOHandleAndFlags.getPointer())
-    return DSOHandleAndFlags.getPointer();
+  if (DSOHandle)
+    return DSOHandle;
 
   auto unsafeMutablePtr = getASTContext().getUnsafeMutablePointerDecl();
   if (!unsafeMutablePtr)
@@ -423,7 +424,7 @@ VarDecl *Module::getDSOHandle() {
   handleVar->getAttrs().add(
     new (ctx) SILGenNameAttr("__dso_handle", /*Implicit=*/true));
   handleVar->setAccessibility(Accessibility::Internal);
-  DSOHandleAndFlags.setPointer(handleVar);
+  DSOHandle = handleVar;
   return handleVar;
 }
 
@@ -519,10 +520,22 @@ void Module::lookupMember(SmallVectorImpl<ValueDecl*> &results,
   }
 }
 
+void Module::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  FORWARD(lookupObjCMethods, (selector, results));
+}
+
 void BuiltinUnit::lookupValue(Module::AccessPathTy accessPath, DeclName name,
                               NLKind lookupKind,
                               SmallVectorImpl<ValueDecl*> &result) const {
   getCache().lookupValue(name.getBaseName(), lookupKind, *this, result);
+}
+
+void BuiltinUnit::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  // No @objc methods in the Builtin module.
 }
 
 DerivedFileUnit::DerivedFileUnit(Module &M)
@@ -558,6 +571,17 @@ void DerivedFileUnit::lookupVisibleDecls(Module::AccessPathTy accessPath,
   for (auto D : DerivedDecls) {
     if (Id.empty() || D->getName() == Id)
       consumer.foundDecl(D, DeclVisibilityKind::VisibleAtTopLevel);
+  }
+}
+
+void DerivedFileUnit::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  for (auto D : DerivedDecls) {
+    if (auto func = dyn_cast<AbstractFunctionDecl>(D)) {
+      if (func->isObjC() && func->getObjCSelector() == selector)
+        results.push_back(func);
+    }
   }
 }
 
@@ -606,6 +630,15 @@ void SourceFile::lookupClassMember(Module::AccessPathTy accessPath,
   getCache().lookupClassMember(accessPath, name, results, *this);
 }
 
+void SourceFile::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  // FIXME: Make sure this table is complete, somehow.
+  auto known = ObjCMethods.find(selector);
+  if (known == ObjCMethods.end()) return;
+  results.append(known->second.begin(), known->second.end());
+}
+
 void Module::getLocalTypeDecls(SmallVectorImpl<TypeDecl*> &Results) const {
   FORWARD(getLocalTypeDecls, (Results));
 }
@@ -633,7 +666,7 @@ DeclContext *BoundGenericType::getGenericParamContext(
   if (!gpContext)
     return getDecl();
 
-  assert(gpContext->getDeclaredTypeOfContext()->getAnyNominal() == getDecl() &&
+  assert(gpContext->isNominalTypeOrNominalTypeExtensionContext() == getDecl() &&
          "not a valid context");
   return gpContext;
 }
@@ -660,8 +693,6 @@ ArrayRef<Substitution> BoundGenericType::getSubstitutions(
     return *known;
 
   // Compute the set of substitutions.
-  llvm::SmallPtrSet<ArchetypeType *, 8> knownArchetypes;
-  SmallVector<ArchetypeType *, 8> archetypeStack;
   TypeSubstitutionMap substitutions;
   auto genericParams = gpContext->getGenericParamsOfContext();
   unsigned index = 0;
@@ -728,8 +759,7 @@ ArrayRef<Substitution> BoundGenericType::getSubstitutions(
     }
 
     // Record this substitution.
-    resultSubstitutions[index] = {archetype, type,
-                                  ctx.AllocateCopy(conformances)};
+    resultSubstitutions[index] = {type, ctx.AllocateCopy(conformances)};
     ++index;
   }
 
@@ -909,6 +939,11 @@ LookupConformanceResult Module::lookupConformance(Type type,
       auto substitutions = type->gatherAllSubstitutions(this, substitutionsVec,
                                                         resolver,
                                                         explicitConformanceDC);
+      
+      for (auto sub : substitutions) {
+        if (sub.getReplacement()->is<ErrorType>())
+          return { nullptr, ConformanceKind::DoesNotConform };
+      }
 
       // Create the specialized conformance entry.
       auto result = ctx.getSpecializedConformance(type, conformance,

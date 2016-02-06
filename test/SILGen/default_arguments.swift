@@ -54,8 +54,8 @@ func testDefaultArg2() {
   defarg2(5)
 }
 
-func autocloseFile(@autoclosure x: () -> String = __FILE__,
-                   @autoclosure y: () -> Int = __LINE__) { }
+func autocloseFile(@autoclosure x: () -> String = #file,
+                   @autoclosure y: () -> Int = #line) { }
 // CHECK-LABEL: sil hidden @_TF17default_arguments17testAutocloseFileFT_T_
 func testAutocloseFile() {
   // CHECK-LABEL: sil shared [transparent] @_TFF17default_arguments17testAutocloseFileFT_T_u_KT_SS : $@convention(thin) () -> @owned String
@@ -66,10 +66,10 @@ func testAutocloseFile() {
   autocloseFile()
 }
 
-func testMagicLiterals(file file: String = __FILE__,
-                       function: String = __FUNCTION__,
-                       line: Int = __LINE__,
-                       column: Int = __COLUMN__) {}
+func testMagicLiterals(file file: String = #file,
+                       function: String = #function,
+                       line: Int = #line,
+                       column: Int = #column) {}
 
 // Check that default argument generator functions don't leak information about
 // user's source.
@@ -189,7 +189,7 @@ func testTakeDefaultArgUnnamed(i: Int) {
   takeDefaultArgUnnamed(i)
 }
 
-func takeDSOHandle(handle: UnsafeMutablePointer<Void> = __DSO_HANDLE__) { }
+func takeDSOHandle(handle: UnsafeMutablePointer<Void> = #dsohandle) { }
 
 // CHECK-LABEL: sil hidden @_TF17default_arguments13testDSOHandleFT_T_
 func testDSOHandle() {
@@ -253,3 +253,14 @@ func test_r18400194() {
   (r18400194)(1)
 }
 
+// rdar://24242783
+//   Don't add capture arguments to local default argument generators.
+func localFunctionWithDefaultArg() {
+  var z = 5
+  func bar(x: Int? = nil) {
+    z += 1
+  }
+  bar()
+}
+// CHECK-LABEL: sil shared @_TIFF17default_arguments27localFunctionWithDefaultArgFT_T_L_3barFTGSqSi__T_A_
+// CHECK-SAME: $@convention(thin) () -> Optional<Int>

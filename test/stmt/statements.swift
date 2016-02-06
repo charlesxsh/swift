@@ -266,7 +266,7 @@ func RepeatWhileStmt1() {
 }
 
 func RepeatWhileStmt2() {
-  repeat // expected-error {{expected '{' after 'repeat'}}
+  repeat // expected-error {{expected '{' after 'repeat'}} expected-error {{expected 'while' after body of 'repeat' statement}}
 }
 
 func RepeatWhileStmt4() {
@@ -276,7 +276,7 @@ func RepeatWhileStmt4() {
 
 func brokenSwitch(x: Int) -> Int {
   switch x {
-  case .Blah(let rep): // expected-error{{enum case 'Blah' not found in type 'Int'}}
+  case .Blah(var rep): // expected-error{{enum case 'Blah' not found in type 'Int'}}
     return rep
   }
 }
@@ -444,6 +444,34 @@ func for_loop_multi_iter() {
 func r23684220(b: Any) {
   if let _ = b ?? b {} // expected-error {{initializer for conditional binding must have Optional type, not 'Any' (aka 'protocol<>')}}
 }
+
+
+// <rdar://problem/21080671> QoI: try/catch (instead of do/catch) creates silly diagnostics
+func f21080671() {
+  try {  // expected-error {{the 'do' keyword is used to specify a 'catch' region}} {{3-6=do}}
+  } catch { }
+  
+  
+  try {  // expected-error {{the 'do' keyword is used to specify a 'catch' region}} {{3-6=do}}
+    f21080671()
+  } catch let x as Int {
+  } catch {
+  }
+}
+
+// <rdar://problem/24467411> QoI: Using "&& #available" should fixit to comma
+// https://twitter.com/radexp/status/694561060230184960
+func f(x : Int, y : Int) {
+  if x == y && #available(iOS 9, *) {}  // expected-error {{expected ',' joining parts of a multi-clause condition}} {{13-15=,}}
+  if #available(iOS 9, *) && x == y {}  // expected-error {{expected ',' joining parts of a multi-clause condition}} {{27-29=,}}
+
+  // https://twitter.com/radexp/status/694790631881883648
+  if x == y && let _ = Optional(y) {}  // expected-error {{expected ',' joining parts of a multi-clause condition}} {{13-15=,}}
+}
+
+
+
+
 
 // Errors in case syntax
 class

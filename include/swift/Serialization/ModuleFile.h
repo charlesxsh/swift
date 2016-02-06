@@ -296,6 +296,9 @@ private:
   using SerializedDeclCommentTable =
       llvm::OnDiskIterableChainedHashTable<DeclCommentTableInfo>;
 
+  using GroupNameTable = llvm::DenseMap<unsigned, StringRef>;
+
+  std::unique_ptr<GroupNameTable> GroupNamesMap;
   std::unique_ptr<SerializedDeclCommentTable> DeclCommentTable;
 
   struct {
@@ -397,6 +400,9 @@ private:
   /// \c comment_block::DeclCommentListLayout format.
   std::unique_ptr<SerializedDeclCommentTable>
   readDeclCommentTable(ArrayRef<uint64_t> fields, StringRef blobData);
+
+  std::unique_ptr<GroupNameTable>
+  readGroupTable(ArrayRef<uint64_t> fields, StringRef blobData);
 
   /// Reads the comment block, which contains USR to comment mappings.
   ///
@@ -553,6 +559,11 @@ public:
                          DeclName name,
                          SmallVectorImpl<ValueDecl*> &results);
 
+  /// Find all Objective-C methods with the given selector.
+  void lookupObjCMethods(
+         ObjCSelector selector,
+         SmallVectorImpl<AbstractFunctionDecl *> &results);
+
   /// Reports all link-time dependencies.
   void collectLinkLibraries(Module::LinkLibraryCallback callback) const;
 
@@ -603,6 +614,8 @@ public:
   virtual void finishNormalConformance(NormalProtocolConformance *conformance,
                                        uint64_t contextData) override;
 
+  Optional<StringRef> getGroupNameById(unsigned Id);
+  Optional<StringRef> getGroupNameForDecl(const Decl *D);
   Optional<BriefAndRawComment> getCommentForDecl(const Decl *D);
   Optional<BriefAndRawComment> getCommentForDeclByUSR(StringRef USR);
 

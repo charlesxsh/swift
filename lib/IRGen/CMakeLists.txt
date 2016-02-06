@@ -21,6 +21,7 @@ add_swift_library(swiftIRGen
   GenOpaque.cpp
   GenPoly.cpp
   GenProto.cpp
+  GenReflection.cpp
   GenStruct.cpp
   GenTuple.cpp
   GenType.cpp
@@ -34,7 +35,6 @@ add_swift_library(swiftIRGen
   SwiftTargetInfo.cpp
   StructLayout.cpp
   TypeLayoutVerifier.cpp
-  UnimplementedTypeInfo.cpp
   LINK_LIBRARIES
     swiftAST
     swiftLLVMPasses

@@ -299,7 +299,6 @@ public:
     if (record)
       otherRep->getImpl().recordBinding(*record);
     otherRep->getImpl().ParentOrFixed = getTypeVariable();
-    assert(otherRep->getImpl().canBindToLValue() == canBindToLValue());
     if (!mustBeMaterializable() && otherRep->getImpl().mustBeMaterializable()) {
       if (record)
         recordBinding(*record);
@@ -355,203 +354,6 @@ public:
 namespace constraints {
 
 struct ResolvedOverloadSetListItem;
-
-/// \brief Describes a failure.
-class Failure : public llvm::FoldingSetNode {
-public:
-  /// \brief The various kinds of failures that can occur 
-  enum FailureKind {
-    /// \brief The type is not bridged to an Objective-C type.
-    IsNotBridgedToObjectiveC,
-    /// \brief The type is not allowed to be an l-value.
-    IsForbiddenLValue,
-    /// Type has no public initializers.
-    NoPublicInitializers,
-    /// The type is not materializable.
-    IsNotMaterializable,
-  };
-
-private:
-  /// \brief The kind of failure this describes.
-  FailureKind kind : 8;
-
-  /// \brief A value, if used.
-  unsigned value;
-
-  /// \brief Another value, if used.
-  unsigned value2;
-
-  /// Describes the location of this failure.
-  ConstraintLocator *locator;
-
-  /// The resolved overload sets that led to this failure.
-  ResolvedOverloadSetListItem *resolvedOverloadSets;
-
-  /// \brief The first type.
-  Type first;
-
-  /// \brief The second value, which may be one of several things (type,
-  /// member name, etc.).
-  union {
-    TypeBase *type;
-  } second;
-
-public:
-  /// \brief Retrieve the failure kind.
-  FailureKind getKind() const { return kind; }
-
-  /// \brief Retrieve the failure locator.
-  ConstraintLocator *getLocator() const {
-    return locator;
-  }
-
-  /// Retrieve the resolved overload sets active when this failure occurred.
-  ResolvedOverloadSetListItem *getResolvedOverloadSets() const {
-    return resolvedOverloadSets;
-  }
-
-  /// \brief Retrieve the first type.
-  Type getFirstType() const { return first; }
-
-  /// \brief Retrieve the second type.
-  Type getSecondType() const {
-    return second.type;
-  }
-
-  /// \brief Retrieve the value.
-  unsigned getValue() const { return value; }
-
-  /// \brief Retrieve the value.
-  unsigned getSecondValue() const { return value2; }
-
-  /// \brief Profile the given failure.
-  void Profile(llvm::FoldingSetNodeID &id) {
-    switch (kind) {
-    case IsForbiddenLValue:
-    case IsNotMaterializable:
-      return Profile(id, locator, kind, resolvedOverloadSets, getFirstType(),
-                     getSecondType());
-
-    case IsNotBridgedToObjectiveC:
-    case NoPublicInitializers:
-      return Profile(id, locator, kind, resolvedOverloadSets, getFirstType(),
-                    value);
-    }
-  }
-
-  /// \brief Dump a debug representation of this failure.
-  LLVM_ATTRIBUTE_DEPRECATED(
-      void dump(SourceManager *SM) const LLVM_ATTRIBUTE_USED,
-      "only for use within the debugger");
-
-  void dump(SourceManager *SM, raw_ostream &OS) const;
-
-private:
-  friend class ConstraintSystem;
-
-  /// \brief Construct a failure involving one type.
-  Failure(ConstraintLocator *locator, FailureKind kind,
-          ResolvedOverloadSetListItem *resolvedOverloadSets,
-          Type type, unsigned value = 0)
-    : kind(kind), value(value), value2(0), locator(locator),
-      resolvedOverloadSets(resolvedOverloadSets), first(type)
-  {
-    second.type = nullptr;
-  }
-
-  /// \brief Construct a failure involving two types and an optional value.
-  Failure(ConstraintLocator *locator, FailureKind kind,
-          ResolvedOverloadSetListItem *resolvedOverloadSets,
-          Type type1, Type type2, unsigned value = 0)
-    : kind(kind), value(value), value2(0), locator(locator),
-      resolvedOverloadSets(resolvedOverloadSets), first(type1)
-  {
-    second.type = type2.getPointer();
-  }
-
-  /// \brief Construct a failure involving two values.
-  Failure(ConstraintLocator *locator, FailureKind kind,
-          ResolvedOverloadSetListItem *resolvedOverloadSets,
-          unsigned value, unsigned value2 = 0)
-    : kind(kind), value(value), value2(value2), locator(locator),
-      resolvedOverloadSets(resolvedOverloadSets)
-  {
-    second.type = nullptr;
-  }
-
-  /// \brief Profile a failure involving one type.
-  static void Profile(llvm::FoldingSetNodeID &id, ConstraintLocator *locator,
-                      FailureKind kind,
-                      ResolvedOverloadSetListItem *resolvedOverloadSets,
-                      Type type, unsigned value = 0) {
-    id.AddPointer(locator);
-    id.AddInteger(kind);
-    id.AddPointer(resolvedOverloadSets);
-    id.AddPointer(type.getPointer());
-    id.AddInteger(value);
-  }
-
-  /// \brief Profile a failure involving two types.
-  /// Note that because FoldingSet hashes on pointers are unstable, we need
-  /// to hash on each type's string representation to preserve ordering.
-  static void Profile(llvm::FoldingSetNodeID &id, ConstraintLocator *locator,
-                      FailureKind kind,
-                      ResolvedOverloadSetListItem *resolvedOverloadSets,
-                      Type type1, Type type2) {
-    id.AddPointer(locator);
-    id.AddInteger(kind);
-    id.AddPointer(resolvedOverloadSets);
-    id.AddString(type1.getString());
-    id.AddString(type2.getString());
-  }
-
-  /// \brief Profile a failure involving two types and a value.
-  static void Profile(llvm::FoldingSetNodeID &id, ConstraintLocator *locator,
-                      FailureKind kind,
-                      ResolvedOverloadSetListItem *resolvedOverloadSets,
-                      Type type1, Type type2, unsigned value) {
-    id.AddPointer(locator);
-    id.AddInteger(kind);
-    id.AddPointer(resolvedOverloadSets);
-    id.AddString(type1.getString());
-    id.AddString(type2.getString());
-    id.AddInteger(value);
-  }
-
-  /// \brief Profile a failure involving a type and a name.
-  static void Profile(llvm::FoldingSetNodeID &id, ConstraintLocator *locator,
-                      FailureKind kind,
-                      ResolvedOverloadSetListItem *resolvedOverloadSets,
-                      Type type, DeclName name) {
-    id.AddPointer(locator);
-    id.AddInteger(kind);
-    id.AddPointer(resolvedOverloadSets);
-    id.AddPointer(type.getPointer());
-    id.AddPointer(name.getOpaqueValue());
-  }
-
-  /// \brief Profile a failure involving two values.
-  static void Profile(llvm::FoldingSetNodeID &id, ConstraintLocator *locator,
-                      FailureKind kind,
-                      ResolvedOverloadSetListItem *resolvedOverloadSets,
-                      unsigned value, unsigned value2 = 0) {
-    id.AddPointer(locator);
-    id.AddInteger(kind);
-    id.AddPointer(resolvedOverloadSets);
-    id.AddInteger(value);
-    id.AddInteger(value2);
-  }
-
-  /// \brief Create a new Failure object with the given arguments, allocated
-  /// from the given bump pointer allocator.
-  template<typename ...Args>
-  static Failure *create(llvm::BumpPtrAllocator &allocator,
-                         ConstraintLocator *locator, FailureKind kind,
-                         Args &&...args) {
-    void *mem = allocator.Allocate(sizeof(Failure), alignof(Failure));
-    return new (mem) Failure(locator, kind, args...);
-  }
-};
 
 /// \brief The kind of type matching to perform in matchTypes().
 enum class TypeMatchKind : char {
@@ -1012,7 +814,7 @@ struct MemberLookupResult {
   
   /// This enum tracks reasons why a candidate is not viable.
   enum UnviableReason {
-    /// Argment labels don't match.
+    /// Argument labels don't match.
     UR_LabelMismatch,
     
     /// This uses a type like Self it its signature that cannot be used on an
@@ -1033,6 +835,8 @@ struct MemberLookupResult {
     /// only have an rvalue base.  This is more specific than the former one.
     UR_MutatingGetterOnRValue,
     
+    /// The member is inaccessible (e.g. a private member in another file).
+    UR_Inaccessible,
   };
   
   /// This is a list of considered, but rejected, candidates, along with a
@@ -1073,18 +877,11 @@ public:
   
   friend class Fix;
   friend class OverloadChoice;
+  friend class ConstraintGraph;
 
   class SolverScope;
 
   Constraint *failedConstraint = nullptr;
-
-  /// \brief Failures that occurred while solving.
-  ///
-  /// FIXME: We really need to track overload sets and type variable bindings
-  /// to make any sense of this data. Also, it probably belongs within
-  /// SolverState.
-  llvm::FoldingSetVector<Failure> failures;
-
 
 private:
 
@@ -1112,13 +909,6 @@ private:
   /// \brief Folding set containing all of the locators used in this
   /// constraint system.
   llvm::FoldingSetVector<ConstraintLocator> ConstraintLocators;
-
-  /// \brief Folding set containing all of the failures that have occurred
-  /// while building and initially simplifying this constraint system.
-  ///
-  /// These failures are unavoidable, in the sense that they occur before
-  /// we have made any (potentially incorrect) assumptions at all.
-  TinyPtrVector<Failure *> unavoidableFailures;
 
   /// \brief The overload sets that have been resolved along the current path.
   ResolvedOverloadSetListItem *resolvedOverloadSets = nullptr;
@@ -1208,7 +998,7 @@ private:
     unsigned depth = 0;
 
     /// \brief Whether to record failures or not.
-    bool recordFailures = false;
+    bool recordFixes = false;
 
     /// The list of constraints that have been retired along the
     /// current path.
@@ -1474,112 +1264,20 @@ public:
   ConstraintLocator *
   getConstraintLocator(const ConstraintLocatorBuilder &builder);
 
-private:
-  /// \brief Record failure with already-simplified arguments.
-  template<typename ...Args>
-  void recordFailureSimplified(ConstraintLocator *locator,
-                               Failure::FailureKind kind,
-                               Args &&...args) {
-    // If there is no solver state, this failure is unavoidable.
-    if (!solverState) {
-      auto failure = Failure::create(getAllocator(), locator, kind,
-                                     resolvedOverloadSets,
-                                     std::forward<Args>(args)...);
-
-      // Debug output.
-      if (getASTContext().LangOpts.DebugConstraintSolver) {
-        auto &log = getASTContext().TypeCheckerDebug->getStream();
-        log.indent(2);
-        failure->dump(&TC.Context.SourceMgr, log);
-      }
-
-      unavoidableFailures.push_back(failure);
-      return;
-    }
-
-    // Check whether we've recorded this failure already.
-    llvm::FoldingSetNodeID id;
-    Failure::Profile(id, locator, kind, resolvedOverloadSets, args...);
-    void *insertPos = nullptr;
-    Failure *failure = failures.FindNodeOrInsertPos(id, insertPos);
-    if (!failure) {
-      // Allocate a new failure and record it.
-      failure = Failure::create(getAllocator(), locator, kind,
-                                resolvedOverloadSets, args...);
-      failures.InsertNode(failure, insertPos);
-    }
-
-    // Debug output.
-    if (getASTContext().LangOpts.DebugConstraintSolver) {
-      auto &log = getASTContext().TypeCheckerDebug->getStream();
-      log.indent(solverState->depth * 2 + 2);
-      failure->dump(&TC.Context.SourceMgr, log);
-    }
-
-    return;
-  }
-
-  /// \brief Simplifies an argument to the failure by simplifying the type.
-  Type simplifyFailureArg(Type type) {
-    // FIXME: Should also map type variables back to their corresponding
-    // archetypes here.
-    return simplifyType(type);
-  }
-
-  /// \brief Simplifies an argument to the failure by simplifying the type.
-  Type simplifyFailureArg(TypeBase *type) {
-    return simplifyType(type);
-  }
-
-  /// \brief Simplifies an argument to the failure (a no-op).
-  unsigned simplifyFailureArg(unsigned arg) {
-    return arg;
-  }
-
-  /// \brief Simplifies an argument to the failure (a no-op).
-  DeclName simplifyFailureArg(DeclName arg) {
-    return arg;
-  }
-
 public:
-  /// \brief Whether we should be recording failures.
-  bool shouldRecordFailures() {
-    // FIXME: It still makes sense to record failures when there are fixes
-    // present, but they should be less desirable.
-    if (!Fixes.empty())
-      return false;
-
-    return !solverState || solverState->recordFailures ||
-           TC.Context.LangOpts.DebugConstraintSolver;
-  }
 
   /// \brief Whether we should attempt to fix problems.
   bool shouldAttemptFixes() {
     if (!(Options & ConstraintSystemFlags::AllowFixes))
       return false;
 
-    return !solverState || solverState->recordFailures;
+    return !solverState || solverState->recordFixes;
   }
 
   /// \brief Log and record the application of the fix. Return true iff any
   /// subsequent solution would be worse than the best known solution.
   bool recordFix(Fix fix, ConstraintLocatorBuilder locator);
-
-  /// \brief Record a failure at the given location with the given kind,
-  /// along with any additional arguments to be passed to the failure
-  /// constructor.
-  template<typename ...Args>
-  void recordFailure(ConstraintLocator *locator, Failure::FailureKind kind,
-                     Args &&...args) {
-    // If we don't want to record failures, don't.
-    if (!shouldRecordFailures() ||
-        (locator && locator->shouldDiscardFailures()))
-      return;
-
-    recordFailureSimplified(locator, kind,
-                            simplifyFailureArg(std::forward<Args>(args))...);
-  }
-
+  
   /// \brief Try to salvage the constraint system by applying (speculative)
   /// fixes to the underlying expression.
   ///
@@ -1720,7 +1418,8 @@ public:
   /// representatives of their equivalence classes, and must be
   /// distinct.
   void mergeEquivalenceClasses(TypeVariableType *typeVar1,
-                               TypeVariableType *typeVar2);
+                               TypeVariableType *typeVar2,
+                               bool updateWorkList = true);
 
   /// \brief Retrieve the fixed type corresponding to the given type variable,
   /// or a null type if there is no fixed type.
@@ -2106,9 +1805,14 @@ public:
   /// perform a lookup into the specified base type to find a candidate list.
   /// The list returned includes the viable candidates as well as the unviable
   /// ones (along with reasons why they aren't viable).
+  ///
+  /// If includeInaccessibleMembers is set to true, this burns compile time to
+  /// try to identify and classify inaccessible members that may be being
+  /// referenced.
   MemberLookupResult performMemberLookup(ConstraintKind constraintKind,
                                          DeclName memberName, Type baseTy,
-                                         ConstraintLocator *memberLocator);
+                                         ConstraintLocator *memberLocator,
+                                         bool includeInaccessibleMembers);
 
 private:
 
@@ -2528,80 +2232,6 @@ void simplifyLocator(Expr *&anchor,
                      Expr *&targetAnchor,
                      SmallVectorImpl<LocatorPathElt> &targetPath,
                      SourceRange &range);
-
-/// Describes the kind of entity to which a locator was resolved.
-enum class ResolvedLocatorKind : uint8_t {
-  /// The locator could not be resolved.
-  Unresolved,
-  /// The locator refers to a function.
-  Function,
-  /// The locator refers to a constructor.
-  Constructor,
-  /// The locator refers to a parameter of a function.
-  Parameter
-};
-
-/// The entity to which a locator resolved.
-class ResolvedLocator {
-  ResolvedLocatorKind kind;
-  ConcreteDeclRef decl;
-
-public:
-  ResolvedLocator() : kind(ResolvedLocatorKind::Unresolved) { }
-
-  enum ForFunction_t { ForFunction };
-  enum ForConstructor_t { ForConstructor };
-  enum ForVar_t { ForVar };
-  
-  ResolvedLocator(ForFunction_t, ConcreteDeclRef decl)
-    : kind(ResolvedLocatorKind::Function), decl(decl)
-  {
-    assert(isa<FuncDecl>(decl.getDecl()));
-  }
-
-  ResolvedLocator(ForConstructor_t, ConcreteDeclRef decl)
-    : kind(ResolvedLocatorKind::Constructor), decl(decl)
-  {
-    assert(isa<ConstructorDecl>(decl.getDecl()));
-  }
-
-  ResolvedLocator(ForVar_t, ConcreteDeclRef decl)
-    : kind(ResolvedLocatorKind::Parameter), decl(decl)
-  {
-    assert(isa<VarDecl>(decl.getDecl()));
-  }
-  
-  /// Determine the kind of entity to which the locator resolved.
-  ResolvedLocatorKind getKind() const { return kind; }
-
-  /// Retrieve the declaration to which the locator resolved.
-  ConcreteDeclRef getDecl() const { return decl; }
-
-  explicit operator bool() const {
-    return getKind() != ResolvedLocatorKind::Unresolved;
-  }
-};
-
-/// Resolve a locator to the specific declaration it references, if possible.
-///
-/// \param cs The constraint system in which the locator will be resolved.
-///
-/// \param locator The locator to resolve.
-///
-/// \param findOvlChoice A function that searches for the overload choice
-/// associated with the given locator, or an empty optional if there is no such
-/// overload.
-///
-/// \returns the entity to which the locator resolved.
-///
-/// FIXME: It would be more natural to express the result as a locator.
-ResolvedLocator resolveLocatorToDecl(
-                  ConstraintSystem &cs,
-                  ConstraintLocator *locator,
-                  std::function<Optional<SelectedOverload>(ConstraintLocator *)>
-                    findOvlChoice,
-                  std::function<ConcreteDeclRef(ValueDecl *decl,
-                                                Type openedType)> getConcreteDeclRef);
 
 } // end namespace constraints
 

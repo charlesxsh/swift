@@ -164,6 +164,21 @@ struct CustomCompletionInfo {
   swift::OptionSet<Context> Contexts;
 };
 
+struct FilterRule {
+  enum Kind {
+    Everything,
+    Module,
+    Keyword,
+    Literal,
+    CustomCompletion,
+    Identifier,
+  };
+  Kind kind;
+  bool hide;
+  std::vector<StringRef> names;
+  std::vector<UIdent> uids;
+};
+
 enum class DiagnosticSeverityKind {
   Warning,
   Error
@@ -259,6 +274,7 @@ struct CursorInfo {
   StringRef TypeName;
   StringRef DocComment;
   StringRef TypeInterface;
+  StringRef GroupName;
   /// Annotated XML pretty printed declaration.
   StringRef AnnotatedDeclaration;
   /// Non-empty if the symbol was imported from a clang module.
@@ -368,8 +384,8 @@ public:
                             ArrayRef<const char *> Args) = 0;
 
   virtual void codeCompleteOpen(StringRef name, llvm::MemoryBuffer *inputBuf,
-                                unsigned offset,
-                                OptionsDictionary *options,
+                                unsigned offset, OptionsDictionary *options,
+                                ArrayRef<FilterRule> filterRules,
                                 GroupedCodeCompletionConsumer &consumer,
                                 ArrayRef<const char *> args) = 0;
 

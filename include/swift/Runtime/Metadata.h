@@ -532,11 +532,14 @@ typedef int getExtraInhabitantIndex(const OpaqueValue *src,
                                     const Metadata *self);
 
 /// Given a valid object of this enum type, extracts the tag value indicating
-/// which case of the enum is inhabited. The tag value can be used to index
-/// into the array returned by the NominalTypeDescriptor's GetCaseTypes
-/// function to get the payload type and check if the payload is indirect.
-typedef unsigned getEnumTag(const OpaqueValue *src,
-                            const Metadata *self);
+/// which case of the enum is inhabited. Returned values are in the range
+/// [-ElementsWithPayload..ElementsWithNoPayload-1].
+///
+/// The tag value can be used to index into the array returned by the
+/// NominalTypeDescriptor's GetCaseTypes function to get the payload type
+/// and check if the payload is indirect.
+typedef int getEnumTag(const OpaqueValue *src,
+                       const Metadata *self);
 
 /// Given a valid object of this enum type, destructively strips the tag
 /// bits, leaving behind a value of the inhabited case payload type.
@@ -548,9 +551,10 @@ typedef void destructiveProjectEnumData(OpaqueValue *src,
 /// Given a valid object of an enum case payload's type, destructively add
 /// the tag bits for the given case, leaving behind a fully-formed value of
 /// the enum type. If the enum case does not have a payload, the initial
-/// state of the value can be undefined.
+/// state of the value can be undefined. The given tag value must be in
+/// the range [-ElementsWithPayload..ElementsWithNoPayload-1].
 typedef void destructiveInjectEnumTag(OpaqueValue *src,
-                                      unsigned tag,
+                                      int tag,
                                       const Metadata *self);
 
 } // end namespace value_witness_types
@@ -935,6 +939,17 @@ static const uintptr_t ObjCReservedBitsMask =
 static const unsigned ObjCReservedLowBits =
   SWIFT_ABI_ARM64_OBJC_NUM_RESERVED_LOW_BITS;
 
+#elif defined(__powerpc64__)
+
+static const uintptr_t LeastValidPointerValue =
+  SWIFT_ABI_DEFAULT_LEAST_VALID_POINTER;
+static const uintptr_t SwiftSpareBitsMask =
+  SWIFT_ABI_POWERPC64_SWIFT_SPARE_BITS_MASK;
+static const uintptr_t ObjCReservedBitsMask =
+  SWIFT_ABI_DEFAULT_OBJC_RESERVED_BITS_MASK;
+static const unsigned ObjCReservedLowBits =
+  SWIFT_ABI_DEFAULT_OBJC_NUM_RESERVED_LOW_BITS;
+
 #else
 
 static const uintptr_t LeastValidPointerValue =
@@ -1077,7 +1092,7 @@ public:
     getValueWitnesses()->_asXIVWT()->storeExtraInhabitant(value, index, this);
   }
 
-  unsigned vw_getEnumTag(const OpaqueValue *value) const {
+  int vw_getEnumTag(const OpaqueValue *value) const {
     return getValueWitnesses()->_asEVWT()->getEnumTag(value, this);
   }
   void vw_destructiveProjectEnumData(OpaqueValue *value) const {
@@ -1202,10 +1217,8 @@ struct EnumTypeDescriptor;
 /// Common information about all nominal types. For generic types, this
 /// descriptor is shared for all instantiations of the generic type.
 struct NominalTypeDescriptor {
-  /// The kind of nominal type descriptor.
-  NominalTypeKind Kind;
   /// The mangled name of the nominal type, with no generic parameters.
-  const char *Name;
+  RelativeDirectPointer<char> Name;
   
   /// The following fields are kind-dependent.
   union {
@@ -1225,12 +1238,12 @@ struct NominalTypeDescriptor {
       
       /// The field names. A doubly-null-terminated list of strings, whose
       /// length and order is consistent with that of the field offset vector.
-      const char *FieldNames;
+      RelativeDirectPointer<char, /*nullable*/ true> FieldNames;
       
       /// The field type vector accessor. Returns a pointer to an array of
       /// type metadata references whose order is consistent with that of the
       /// field offset vector.
-      const FieldType *(*GetFieldTypes)(const Metadata *Self);
+      RelativeDirectPointer<const FieldType * (const Metadata *)> GetFieldTypes;
 
       /// True if metadata records for this type have a field offset vector for
       /// its stored properties.
@@ -1249,12 +1262,12 @@ struct NominalTypeDescriptor {
       
       /// The field names. A doubly-null-terminated list of strings, whose
       /// length and order is consistent with that of the field offset vector.
-      const char *FieldNames;
+      RelativeDirectPointer<char, /*nullable*/ true> FieldNames;
       
       /// The field type vector accessor. Returns a pointer to an array of
       /// type metadata references whose order is consistent with that of the
       /// field offset vector.
-      const FieldType *(*GetFieldTypes)(const Metadata *Self);
+      RelativeDirectPointer<const FieldType * (const Metadata *)> GetFieldTypes;
 
       /// True if metadata records for this type have a field offset vector for
       /// its stored properties.
@@ -1272,11 +1285,11 @@ struct NominalTypeDescriptor {
       /// The names of the cases. A doubly-null-terminated list of strings,
       /// whose length is NumNonEmptyCases + NumEmptyCases. Cases are named in
       /// tag order, non-empty cases first, followed by empty cases.
-      const char *CaseNames;
+      RelativeDirectPointer<char, /*nullable*/ true> CaseNames;
       /// The field type vector accessor. Returns a pointer to an array of
       /// type metadata references whose order is consistent with that of the
       /// CaseNames. Only types for payload cases are provided.
-      const FieldType *(*GetCaseTypes)(const Metadata *Self);
+      RelativeDirectPointer<const FieldType * (const Metadata *)> GetCaseTypes;
 
       uint32_t getNumPayloadCases() const {
         return NumPayloadCasesAndPayloadSizeOffset & 0x00FFFFFFU;
@@ -1297,10 +1310,20 @@ struct NominalTypeDescriptor {
     } Enum;
   };
   
+  RelativeDirectPointerIntPair<GenericMetadata, NominalTypeKind>
+    GenericMetadataPatternAndKind;
+
   /// A pointer to the generic metadata pattern that is used to instantiate
-  /// instances of this type. Null if the type is not generic.
-  GenericMetadata *GenericMetadataPattern;
-  
+  /// instances of this type. Zero if the type is not generic.
+  GenericMetadata *getGenericMetadataPattern() const {
+    return const_cast<GenericMetadata*>(
+                                    GenericMetadataPatternAndKind.getPointer());
+  }
+
+  NominalTypeKind getKind() const {
+    return GenericMetadataPatternAndKind.getInt();
+  }
+
   /// The generic parameter descriptor header. This describes how to find and
   /// parse the generic parameter vector in metadata records for this nominal
   /// type.
@@ -1504,7 +1527,7 @@ public:
   /// Get a pointer to the field type vector, if present, or null.
   const FieldType *getFieldTypes() const {
     assert(isTypeMetadata());
-    auto *getter = Description->Class.GetFieldTypes;
+    auto *getter = Description->Class.GetFieldTypes.get();
     if (!getter)
       return nullptr;
     
@@ -1682,7 +1705,7 @@ struct StructMetadata : public Metadata {
   
   /// Get a pointer to the field type vector, if present, or null.
   const FieldType *getFieldTypes() const {
-    auto *getter = Description->Struct.GetFieldTypes;
+    auto *getter = Description->Struct.GetFieldTypes.get();
     if (!getter)
       return nullptr;
     
@@ -1899,7 +1922,29 @@ struct ProtocolDescriptor {
   
   /// Additional flags.
   ProtocolDescriptorFlags Flags;
-  
+
+  /// The minimum size of any conforming witness table, in words.
+  ///
+  /// When a conformance is ultimately instantiated from a GenericWitnessTable,
+  /// this value must be greater than or equal to the GenericWitnessTable's
+  /// WitnessTableSizeInWords.
+  ///
+  /// Only meaningful if ProtocolDescriptorFlags::IsResilient is set.
+  uint16_t MinimumWitnessTableSizeInWords;
+
+  /// The maximum amount to copy from the default requirements in words.
+  /// If any requirements beyond MinimumWitnessTableSizeInWords are present
+  /// in the witness table template, they will be not be overwritten with
+  /// defaults.
+  ///
+  /// Only meaningful if ProtocolDescriptorFlags::IsResilient is set.
+  uint16_t DefaultWitnessTableSizeInWords;
+
+  /// Default requirements are tail-allocated here.
+  void **getDefaultWitnesses() const {
+    return (void **) (this + 1);
+  }
+
   constexpr ProtocolDescriptor(const char *Name,
                                const ProtocolDescriptorList *Inherited,
                                ProtocolDescriptorFlags Flags)
@@ -1909,7 +1954,9 @@ struct ProtocolDescriptor {
       _ObjC_OptionalClassMethods(nullptr),
       _ObjC_InstanceProperties(nullptr),
       DescriptorSize(sizeof(ProtocolDescriptor)),
-      Flags(Flags)
+      Flags(Flags),
+      MinimumWitnessTableSizeInWords(0),
+      DefaultWitnessTableSizeInWords(0)
   {}
 };
   
@@ -2104,15 +2151,39 @@ struct GenericMetadata {
   const void *getMetadataTemplate() const {
     return reinterpret_cast<const void *>(this + 1);
   }
+
+  /// Return the nominal type descriptor for the template metadata
+  const NominalTypeDescriptor *getTemplateDescription() const {
+    auto bytes = reinterpret_cast<const uint8_t *>(getMetadataTemplate());
+    auto metadata = reinterpret_cast<const Metadata *>(bytes + AddressPoint);
+    return metadata->getNominalTypeDescriptor();
+  }
 };
 
-/// \brief The control structure of a generic protocol conformance.
+/// \brief The control structure of a generic or resilient protocol
+/// conformance.
+///
+/// Witness tables need to be instantiated at runtime in these cases:
+/// - For a generic conforming type, associated type requirements might be
+///   dependent on the conforming type.
+/// - For a type conforming to a resilient protocol, the runtime size of
+///   the witness table is not known because default requirements can be
+///   added resiliently.
+///
+/// One per conformance.
 struct GenericWitnessTable {
-  /// The size of the witness table in words.
+  /// The size of the witness table in words.  This amount is copied from
+  /// the witness table template into the instantiated witness table.
   uint16_t WitnessTableSizeInWords;
 
-  /// The amount to copy from the pattern in words.  The rest is zeroed.
-  uint16_t WitnessTableSizeInWordsToCopy;
+  /// The amount of private storage to allocate before the address point,
+  /// in words. This memory is zeroed out in the instantiated witness table
+  /// template.
+  uint16_t WitnessTablePrivateSizeInWords;
+
+  /// The protocol descriptor. Only used for resilient conformances.
+  RelativeIndirectablePointer<ProtocolDescriptor,
+                              /*nullable*/ true> Protocol;
 
   /// The pattern.
   RelativeDirectPointer<WitnessTable> Pattern;
@@ -2120,9 +2191,79 @@ struct GenericWitnessTable {
   /// The instantiation function, which is called after the template is copied.
   RelativeDirectPointer<void(WitnessTable *instantiatedTable,
                              const Metadata *type,
-                             void * const *instantiationArgs)> Instantiator;
+                             void * const *instantiationArgs),
+                        /*nullable*/ true> Instantiator;
 
   void *PrivateData[swift::NumGenericMetadataPrivateDataWords];
+};
+
+/// The structure of a type metadata record.
+///
+/// This contains enough static information to recover type metadata from a
+/// name. It is only emitted for types that do not have an explicit protocol
+/// conformance record. 
+///
+/// This structure is notionally a subtype of a protocol conformance record
+/// but as we cannot change the conformance record layout we have to make do
+/// with some duplicated code.
+struct TypeMetadataRecord {
+private:
+  // Some description of the type that is resolvable at runtime.
+  union {
+    /// A direct reference to the metadata.
+    RelativeDirectPointer<Metadata> DirectType;
+
+    /// The nominal type descriptor for a resilient or generic type.
+    RelativeDirectPointer<NominalTypeDescriptor> TypeDescriptor;
+  };
+
+  /// Flags describing the type metadata record.
+  TypeMetadataRecordFlags Flags;
+  
+public:
+  TypeMetadataRecordKind getTypeKind() const {
+    return Flags.getTypeKind();
+  }
+  
+  const Metadata *getDirectType() const {
+    switch (Flags.getTypeKind()) {
+    case TypeMetadataRecordKind::Universal:
+      return nullptr;
+
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
+    case TypeMetadataRecordKind::UniqueDirectClass:
+      break;
+        
+    case TypeMetadataRecordKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
+      assert(false && "not direct type metadata");
+    }
+
+    return DirectType;
+  }
+
+  const NominalTypeDescriptor *getNominalTypeDescriptor() const {
+    switch (Flags.getTypeKind()) {
+    case TypeMetadataRecordKind::Universal:
+      return nullptr;
+
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
+      break;
+        
+    case TypeMetadataRecordKind::UniqueDirectClass:
+    case TypeMetadataRecordKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
+      assert(false && "not generic metadata pattern");
+    }
+    
+    return TypeDescriptor;
+  }
+
+  /// Get the canonical metadata for the type referenced by this record, or
+  /// return null if the record references a generic or universal type.
+  const Metadata *getCanonicalTypeMetadata() const;
 };
 
 /// The structure of a protocol conformance record.
@@ -2148,9 +2289,9 @@ private:
     /// An indirect reference to the metadata.
     RelativeIndirectablePointer<const ClassMetadata *> IndirectClass;
     
-    /// The generic metadata pattern for a generic type which has instances that
-    /// conform to the protocol.
-    RelativeIndirectablePointer<GenericMetadata> GenericPattern;
+    /// The nominal type descriptor for a resilient or generic type which has
+    /// instances that conform to the protocol.
+    RelativeIndirectablePointer<NominalTypeDescriptor> TypeDescriptor;
   };
   
   
@@ -2177,7 +2318,7 @@ public:
     return Flags;
   }
   
-  ProtocolConformanceTypeKind getTypeKind() const {
+  TypeMetadataRecordKind getTypeKind() const {
     return Flags.getTypeKind();
   }
   ProtocolConformanceReferenceKind getConformanceKind() const {
@@ -2186,16 +2327,16 @@ public:
   
   const Metadata *getDirectType() const {
     switch (Flags.getTypeKind()) {
-    case ProtocolConformanceTypeKind::Universal:
+    case TypeMetadataRecordKind::Universal:
       return nullptr;
 
-    case ProtocolConformanceTypeKind::UniqueDirectType:
-    case ProtocolConformanceTypeKind::NonuniqueDirectType:
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
       break;
         
-    case ProtocolConformanceTypeKind::UniqueDirectClass:
-    case ProtocolConformanceTypeKind::UniqueIndirectClass:
-    case ProtocolConformanceTypeKind::UniqueGenericPattern:
+    case TypeMetadataRecordKind::UniqueDirectClass:
+    case TypeMetadataRecordKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
       assert(false && "not direct type metadata");
     }
 
@@ -2205,15 +2346,15 @@ public:
   // FIXME: This shouldn't exist
   const ClassMetadata *getDirectClass() const {
     switch (Flags.getTypeKind()) {
-    case ProtocolConformanceTypeKind::Universal:
+    case TypeMetadataRecordKind::Universal:
       return nullptr;
-    case ProtocolConformanceTypeKind::UniqueDirectClass:
+    case TypeMetadataRecordKind::UniqueDirectClass:
       break;
         
-    case ProtocolConformanceTypeKind::UniqueDirectType:
-    case ProtocolConformanceTypeKind::NonuniqueDirectType:
-    case ProtocolConformanceTypeKind::UniqueGenericPattern:
-    case ProtocolConformanceTypeKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
+    case TypeMetadataRecordKind::UniqueIndirectClass:
       assert(false && "not direct class object");
     }
 
@@ -2224,38 +2365,38 @@ public:
   
   const ClassMetadata * const *getIndirectClass() const {
     switch (Flags.getTypeKind()) {
-    case ProtocolConformanceTypeKind::Universal:
+    case TypeMetadataRecordKind::Universal:
       return nullptr;
 
-    case ProtocolConformanceTypeKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueIndirectClass:
       break;
         
-    case ProtocolConformanceTypeKind::UniqueDirectType:
-    case ProtocolConformanceTypeKind::UniqueDirectClass:
-    case ProtocolConformanceTypeKind::NonuniqueDirectType:
-    case ProtocolConformanceTypeKind::UniqueGenericPattern:
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::UniqueDirectClass:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
       assert(false && "not indirect class object");
     }
     
     return IndirectClass;
   }
   
-  const GenericMetadata *getGenericPattern() const {
+  const NominalTypeDescriptor *getNominalTypeDescriptor() const {
     switch (Flags.getTypeKind()) {
-    case ProtocolConformanceTypeKind::Universal:
+    case TypeMetadataRecordKind::Universal:
       return nullptr;
 
-    case ProtocolConformanceTypeKind::UniqueGenericPattern:
+    case TypeMetadataRecordKind::UniqueNominalTypeDescriptor:
       break;
         
-    case ProtocolConformanceTypeKind::UniqueDirectClass:
-    case ProtocolConformanceTypeKind::UniqueIndirectClass:
-    case ProtocolConformanceTypeKind::UniqueDirectType:
-    case ProtocolConformanceTypeKind::NonuniqueDirectType:
+    case TypeMetadataRecordKind::UniqueDirectClass:
+    case TypeMetadataRecordKind::UniqueIndirectClass:
+    case TypeMetadataRecordKind::UniqueDirectType:
+    case TypeMetadataRecordKind::NonuniqueDirectType:
       assert(false && "not generic metadata pattern");
     }
     
-    return GenericPattern;
+    return TypeDescriptor;
   }
   
   /// Get the directly-referenced static witness table.
@@ -2290,7 +2431,7 @@ public:
   /// type.
   const swift::WitnessTable *getWitnessTable(const Metadata *type) const;
   
-#if defined(NDEBUG) && SWIFT_OBJC_INTEROP
+#if !defined(NDEBUG) && SWIFT_OBJC_INTEROP
   void dump() const;
 #endif
 };
@@ -2321,27 +2462,6 @@ extern "C" const Metadata *
 swift_getGenericMetadata(GenericMetadata *pattern,
                          const void *arguments);
 
-// Fast entry points for swift_getGenericMetadata with a small number of
-// template arguments.
-extern "C" const Metadata *
-swift_getGenericMetadata1(GenericMetadata *pattern,
-                          const void *arg0);
-extern "C" const Metadata *
-swift_getGenericMetadata2(GenericMetadata *pattern,
-                          const void *arg0,
-                          const void *arg1);
-extern "C" const Metadata *
-swift_getGenericMetadata3(GenericMetadata *pattern,
-                          const void *arg0,
-                          const void *arg1,
-                          const void *arg2);
-extern "C" const Metadata *
-swift_getGenericMetadata4(GenericMetadata *pattern,
-                          const void *arg0,
-                          const void *arg1,
-                          const void *arg2,
-                          const void *arg3);
-
 // Callback to allocate a generic class metadata object.
 extern "C" ClassMetadata *
 swift_allocateGenericClassMetadata(GenericMetadata *pattern,
@@ -2353,8 +2473,18 @@ extern "C" Metadata *
 swift_allocateGenericValueMetadata(GenericMetadata *pattern,
                                    const void *arguments);
 
-/// Instantiate a generic protocol witness table.
+/// Instantiate a resilient or generic protocol witness table.
 ///
+/// \param genericTable - The witness table template for the
+///   conformance. It may either have fields that require runtime
+///   initialization, or be missing requirements at the end for
+///   which default witnesses are available.
+///
+/// \param type - The conforming type, used to form a uniquing key
+///   for the conformance. If the witness table is not dependent on
+///   the substituted type of the conformance, this can be set to
+///   nullptr, in which case there will only be one instantiated
+///   witness table per witness table template.
 ///
 /// \param instantiationArgs - An opaque pointer that's forwarded to
 ///   the instantiation function, used for conditional conformances.
@@ -2362,11 +2492,12 @@ swift_allocateGenericValueMetadata(GenericMetadata *pattern,
 ///   never form part of the uniquing key for the conformance, which
 ///   is ultimately a statement about the user model of overlapping
 ///   conformances.
+///
 extern "C" const WitnessTable *
 swift_getGenericWitnessTable(GenericWitnessTable *genericTable,
                              const Metadata *type,
                              void * const *instantiationArgs);
-  
+
 /// \brief Fetch a uniqued metadata for a function type.
 extern "C" const FunctionTypeMetadata *
 swift_getFunctionTypeMetadata(const void *flagsArgsAndResult[]);
@@ -2817,7 +2948,12 @@ const WitnessTable *swift_conformsToProtocol(const Metadata *type,
 extern "C"
 void swift_registerProtocolConformances(const ProtocolConformanceRecord *begin,
                                         const ProtocolConformanceRecord *end);
-  
+
+/// Register a block of type metadata records dynamic lookup.
+extern "C"
+void swift_registerTypeMetadataRecords(const TypeMetadataRecord *begin,
+                                       const TypeMetadataRecord *end);
+
 /// Return the type name for a given type metadata.
 std::string nameForMetadata(const Metadata *type,
                             bool qualified = true);

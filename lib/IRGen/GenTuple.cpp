@@ -11,7 +11,7 @@
 //===----------------------------------------------------------------------===//
 //
 //  This file implements IR generation for tuple types in Swift.  This
-//  includes creating the IR type as  well as emitting the primitive access
+//  includes creating the IR type as well as emitting the primitive access
 //  operations.
 //
 //  It is assumed in several places in IR-generation that the
@@ -149,7 +149,7 @@ namespace {
         = cast<FixedTypeInfo>(asImpl().getFields()[0].getTypeInfo());
       auto size = asImpl().getFixedSize().getValueInBits();
       
-      if (fieldTI.isKnownEmpty())
+      if (fieldTI.isKnownEmpty(ResilienceExpansion::Maximal))
         return APInt(size, 0);
       
       APInt firstMask = fieldTI.getFixedExtraInhabitantMask(IGM);

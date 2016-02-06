@@ -68,7 +68,7 @@ enum SwitchEnvy {
   case X(Y) where true: // expected-error{{'case' label can only appear inside a 'switch' statement}}
   case 0: // expected-error{{'case' label can only appear inside a 'switch' statement}}
   case _: // expected-error{{'case' label can only appear inside a 'switch' statement}}
-  case (_, let x, 0): // expected-error{{'case' label can only appear inside a 'switch' statement}}
+  case (_, var x, 0): // expected-error{{'case' label can only appear inside a 'switch' statement}}
 }
 
 enum HasMethodsPropertiesAndCtors {
@@ -428,4 +428,8 @@ public protocol RawValueB
 
 enum RawValueBTest: Double, RawValueB {
   case A, B
+}
+
+enum foo : String {
+  case bar = nil // expected-error {{cannot convert nil to raw type 'String'}}
 }

@@ -19,7 +19,7 @@ case (0..<10, _, _),
 }
 
 switch (1, 2) {
-case (let a, a): // expected-error {{use of unresolved identifier 'a'}}
+case (var a, a): // expected-error {{use of unresolved identifier 'a'}}
   ()
 }
 
@@ -27,17 +27,17 @@ case (let a, a): // expected-error {{use of unresolved identifier 'a'}}
 
 protocol P { func p() }
 
-class B : P {
-  init() {}
+class B : P { 
+  init() {} 
   func p() {}
   func b() {}
 }
 class D : B {
-  override init() { super.init() }
+  override init() { super.init() } 
   func d() {}
 }
 class E {
-  init() {}
+  init() {} 
   func e() {}
 }
 
@@ -140,7 +140,7 @@ default: break
 
 // <rdar://problem/21995744> QoI: Binary operator '~=' cannot be applied to operands of type 'String' and 'String?'
 switch ("foo" as String?) {
-case "what": break // expected-error{{expression pattern of type 'String' cannot match values of type 'String?'}}
+case "what": break // expected-error{{value of optional type 'String?' not unwrapped; did you mean to use '!' or '?'?}}
 default: break
 }
 
@@ -165,12 +165,9 @@ case x ?? 42: break // match value
 default: break
 }
 
-// FIXME: rdar://problem/23378003
-// These will eventually become errors.
-for (var x) in 0...100 {} // expected-warning {{Use of 'var' binding here is deprecated and will be removed in a future version of Swift}} {{6-9=}}
-for var x in 0...100 {}  // expected-warning {{Use of 'var' binding here is deprecated and will be removed in a future version of Swift}} {{5-9=}}
-
-for (let x) in 0...100 {} // expected-error {{'let' pattern is already in an immutable context}}
+for (var x) in 0...100 {}
+for var x in 0...100 {}  // rdar://20167543
+for (let x) in 0...100 {} // expected-error {{'let' pattern cannot appear nested in an already immutable context}}
 
 var (let y) = 42  // expected-error {{'let' cannot appear nested inside another 'var' or 'let' pattern}}
 let (var z) = 42  // expected-error {{'var' cannot appear nested inside another 'var' or 'let' pattern}}
@@ -181,7 +178,7 @@ let (var z) = 42  // expected-error {{'var' cannot appear nested inside another 
 // at least we don't crash anymore.
 
 protocol PP {
-  typealias E
+  associatedtype E
 }
 
 struct A<T> : PP {
@@ -209,16 +206,14 @@ func good(a: A<EE>) -> Int {
 }
 
 func bad(a: A<EE>) {
-  a.map { // expected-error {{cannot invoke 'map' with an argument list of type '((EE) -> _)'}}
-  // expected-note@-1 {{expected an argument list of type '(EE -> T)'}}
+  a.map { // expected-error {{generic parameter 'T' could not be inferred}}
     let _: EE = $0
     return 1
   }
 }
 
 func ugly(a: A<EE>) {
-  a.map { // expected-error {{cannot invoke 'map' with an argument list of type '((EE) -> _)'}}
-  // expected-note@-1 {{expected an argument list of type '(EE -> T)'}}
+  a.map { // expected-error {{generic parameter 'T' could not be inferred}}
     switch $0 {
     case .A:
       return 1

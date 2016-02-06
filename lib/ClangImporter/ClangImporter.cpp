@@ -33,6 +33,7 @@
 #include "swift/Basic/Version.h"
 #include "swift/ClangImporter/ClangImporterOptions.h"
 #include "swift/Parse/Lexer.h"
+#include "swift/Parse/Parser.h"
 #include "swift/Config.h"
 #include "clang/AST/ASTContext.h"
 #include "clang/AST/Mangle.h"
@@ -59,6 +60,7 @@
 #include <memory>
 
 using namespace swift;
+using namespace importer;
 
 // Commonly-used Clang classes.
 using clang::CompilerInstance;
@@ -238,11 +240,10 @@ ClangImporter::ClangImporter(ASTContext &ctx,
   : ClangModuleLoader(tracker),
     Impl(*new Implementation(ctx, clangImporterOpts))
 {
-  Impl.Retain();
 }
 
 ClangImporter::~ClangImporter() {
-  Impl.Release();
+  delete &Impl;
 }
 
 void ClangImporter::setTypeResolver(LazyResolver &resolver) {
@@ -547,7 +548,8 @@ ClangImporter::create(ASTContext &ctx,
                          sourceBuffer.release());
 
   // Install a Clang module file extension to build Swift name lookup tables.
-  invocation->getFrontendOpts().ModuleFileExtensions.push_back(&importer->Impl);
+  invocation->getFrontendOpts().ModuleFileExtensions.push_back(
+    new Implementation::SwiftNameLookupExtension(importer->Impl));
 
   // Create a compiler instance.
   auto PCHContainerOperations =
@@ -739,10 +741,6 @@ void ClangImporter::Implementation::addMacrosToLookupTable(
     clang::MacroDirective *MD = pp.getLocalMacroDirectiveHistory(macro.first);
     if (!MD) continue;
 
-    // Import the name.
-    auto name = importIdentifier(macro.first);
-    if (name.empty()) continue;
-
     // Walk the history.
     for (; MD; MD = MD->getPrevious()) {
       // Check whether we have a macro defined in this module.
@@ -765,6 +763,8 @@ void ClangImporter::Implementation::addMacrosToLookupTable(
         break;
 
       // Add this entry.
+      auto name = importMacroName(macro.first, info, clangCtx);
+      if (name.empty()) continue;
       table.addEntry(name, info, clangCtx.getTranslationUnitDecl());
     }
   }
@@ -802,6 +802,7 @@ bool ClangImporter::Implementation::importHeader(
   // Force the import to occur.
   pp.LookAhead(0);
 
+  SmallVector<clang::NamedDecl *, 16> parsedNamedDecls;
   clang::Parser::DeclGroupPtrTy parsed;
   while (!Parser->ParseTopLevelDecl(parsed)) {
     if (!parsed) continue;
@@ -809,13 +810,16 @@ bool ClangImporter::Implementation::importHeader(
     for (auto *D : parsed.get()) {
       if (trackParsedSymbols)
         addBridgeHeaderTopLevelDecls(D);
-
-      if (auto named = dyn_cast<clang::NamedDecl>(D)) {
-        addEntryToLookupTable(getClangSema(), BridgingHeaderLookupTable,
-                              named);
-      }
+      if (auto named = dyn_cast<clang::NamedDecl>(D))
+        parsedNamedDecls.push_back(named);
     }
   }
+
+  // We can't do this as we're parsing because we may want to resolve naming
+  // conflicts between the things we've parsed.
+  for (auto *named : parsedNamedDecls)
+    addEntryToLookupTable(getClangSema(), BridgingHeaderLookupTable, named);
+
   pp.EndSourceFile();
   bumpGeneration();
 
@@ -1170,6 +1174,13 @@ ClangImporter::Implementation::Implementation(ASTContext &ctx,
     DeprecatedAsUnavailableMessage =
       "APIs deprecated as of OS X 10.9 and earlier are unavailable in Swift";
   }
+
+  // Prepopulate the set of module prefixes.
+  // FIXME: Hard-coded list should move into the module map language.
+  if (OmitNeedlessWords) {
+    ModulePrefixes["Foundation"] = "NS";
+    ModulePrefixes["ObjectiveC"] = "NS";
+  }
 }
 
 
@@ -1349,280 +1360,6 @@ ClangImporter::Implementation::exportName(Identifier name) {
     return clang::DeclarationName();
 
   return ident;
-}
-
-/// Parse a stringified Swift declaration name, e.g. "init(frame:)".
-static StringRef parseDeclName(StringRef Name,
-                               SmallVectorImpl<StringRef> &ArgNames,
-                               bool &IsFunctionName) {
-  if (Name.back() != ')') {
-    IsFunctionName = false;
-    if (Lexer::isIdentifier(Name) && Name != "_")
-      return Name;
-
-    return "";
-  }
-
-  IsFunctionName = true;
-
-  StringRef BaseName, Parameters;
-  std::tie(BaseName, Parameters) = Name.split('(');
-  if (!Lexer::isIdentifier(BaseName) || BaseName == "_")
-    return "";
-
-  if (Parameters.empty())
-    return "";
-  Parameters = Parameters.drop_back(); // ')'
-
-  if (Parameters.empty())
-    return BaseName;
-
-  if (Parameters.back() != ':')
-    return "";
-
-  do {
-    StringRef NextParam;
-    std::tie(NextParam, Parameters) = Parameters.split(':');
-
-    if (!Lexer::isIdentifier(NextParam))
-      return "";
-    Identifier NextParamID;
-    if (NextParam == "_")
-      ArgNames.push_back("");
-    else
-      ArgNames.push_back(NextParam);
-  } while (!Parameters.empty());
-
-  return BaseName;
-}
-
-/// \brief Returns the common prefix of two strings at camel-case word
-/// granularity.
-///
-/// For example, given "NSFooBar" and "NSFooBas", returns "NSFoo"
-/// (not "NSFooBa"). The returned StringRef is a slice of the "a" argument.
-///
-/// If either string has a non-identifier character immediately after the
-/// prefix, \p followedByNonIdentifier will be set to \c true. If both strings
-/// have identifier characters after the prefix, \p followedByNonIdentifier will
-/// be set to \c false. Otherwise, \p followedByNonIdentifier will not be
-/// changed from its initial value.
-///
-/// This is used to derive the common prefix of enum constants so we can elide
-/// it from the Swift interface.
-static StringRef getCommonWordPrefix(StringRef a, StringRef b,
-                                     bool &followedByNonIdentifier) {
-  auto aWords = camel_case::getWords(a), bWords = camel_case::getWords(b);
-  auto aI = aWords.begin(), aE = aWords.end(),
-       bI = bWords.begin(), bE = bWords.end();
-
-  unsigned prevLength = 0;
-  unsigned prefixLength = 0;
-  for ( ; aI != aE && bI != bE; ++aI, ++bI) {
-    if (*aI != *bI) {
-      followedByNonIdentifier = false;
-      break;
-    }
-
-    prevLength = prefixLength;
-    prefixLength = aI.getPosition() + aI->size();
-  }
-
-  // Avoid creating a prefix where the rest of the string starts with a number.
-  if ((aI != aE && !Lexer::isIdentifier(*aI)) ||
-      (bI != bE && !Lexer::isIdentifier(*bI))) {
-    followedByNonIdentifier = true;
-    prefixLength = prevLength;
-  }
-
-  return a.slice(0, prefixLength);
-}
-
-/// Returns the common word-prefix of two strings, allowing the second string
-/// to be a common English plural form of the first.
-///
-/// For example, given "NSProperty" and "NSProperties", the full "NSProperty"
-/// is returned. Given "NSMagicArmor" and "NSMagicArmory", only
-/// "NSMagic" is returned.
-///
-/// The "-s", "-es", and "-ies" patterns cover every plural NS_OPTIONS name
-/// in Cocoa and Cocoa Touch.
-///
-/// \see getCommonWordPrefix
-static StringRef getCommonPluralPrefix(StringRef singular, StringRef plural) {
-  assert(!plural.empty());
-
-  if (singular.empty())
-    return singular;
-
-  bool ignored;
-  StringRef commonPrefix = getCommonWordPrefix(singular, plural, ignored);
-  if (commonPrefix.size() == singular.size() || plural.back() != 's')
-    return commonPrefix;
-
-  StringRef leftover = singular.substr(commonPrefix.size());
-  StringRef firstLeftoverWord = camel_case::getFirstWord(leftover);
-  StringRef commonPrefixPlusWord =
-      singular.substr(0, commonPrefix.size() + firstLeftoverWord.size());
-
-  // Is the plural string just "[singular]s"?
-  plural = plural.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  if (plural.empty() || plural.back() != 'e')
-    return commonPrefix;
-
-  // Is the plural string "[singular]es"?
-  plural = plural.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  if (plural.empty() || !(plural.back() == 'i' && singular.back() == 'y'))
-    return commonPrefix;
-
-  // Is the plural string "[prefix]ies" and the singular "[prefix]y"?
-  plural = plural.drop_back();
-  firstLeftoverWord = firstLeftoverWord.drop_back();
-  if (plural.endswith(firstLeftoverWord))
-    return commonPrefixPlusWord;
-
-  return commonPrefix;
-}
-
-StringRef ClangImporter::Implementation::getEnumConstantNamePrefix(
-            clang::Sema &sema,
-            const clang::EnumDecl *decl) {
-  switch (classifyEnum(sema.getPreprocessor(), decl)) {
-  case EnumKind::Enum:
-  case EnumKind::Options:
-    // Enums are mapped to Swift enums, Options to Swift option sets, both
-    // of which attempt prefix-stripping.
-    break;
-
-  case EnumKind::Constants:
-  case EnumKind::Unknown:
-    // Nothing to do.
-    return StringRef();
-  }
-
-  // If there are no enumers, there is no prefix to compute.
-  auto ec = decl->enumerator_begin(), ecEnd = decl->enumerator_end();
-  if (ec == ecEnd)
-    return StringRef();
-
-  // Determine whether we can cache the result.
-  // FIXME: Pass in a cache?
-  bool useCache = &sema == &getClangSema();
-
-  // If we've already computed the prefix, return it.
-  auto known = useCache ? EnumConstantNamePrefixes.find(decl)
-                        : EnumConstantNamePrefixes.end();
-  if (known != EnumConstantNamePrefixes.end())
-    return known->second;
-
-  // Determine whether the given enumerator is non-deprecated and has no
-  // specifically-provided name.
-  auto isNonDeprecatedWithoutCustomName =
-    [](const clang::EnumConstantDecl *elem) -> bool {
-      if (elem->hasAttr<clang::SwiftNameAttr>())
-        return false;
-
-      clang::VersionTuple maxVersion{~0U, ~0U, ~0U};
-      switch (elem->getAvailability(nullptr, maxVersion)) {
-      case clang::AR_Available:
-      case clang::AR_NotYetIntroduced:
-        for (auto attr : elem->attrs()) {
-          if (auto annotate = dyn_cast<clang::AnnotateAttr>(attr)) {
-            if (annotate->getAnnotation() == "swift1_unavailable")
-              return false;
-          }
-          if (auto avail = dyn_cast<clang::AvailabilityAttr>(attr)) {
-            if (avail->getPlatform()->getName() == "swift")
-              return false;
-          }
-        }
-        return true;
-
-      case clang::AR_Deprecated:
-      case clang::AR_Unavailable:
-        return false;
-      }
-    };
-
-  // Move to the first non-deprecated enumerator, or non-swift_name'd
-  // enumerator, if present.
-  auto firstNonDeprecated = std::find_if(ec, ecEnd,
-                                         isNonDeprecatedWithoutCustomName);
-  bool hasNonDeprecated = (firstNonDeprecated != ecEnd);
-  if (hasNonDeprecated) {
-    ec = firstNonDeprecated;
-  } else {
-    // Advance to the first case without a custom name, deprecated or not.
-    while (ec != ecEnd && (*ec)->hasAttr<clang::SwiftNameAttr>())
-      ++ec;
-    if (ec == ecEnd) {
-      if (useCache)
-        EnumConstantNamePrefixes.insert({decl, StringRef()});
-      return StringRef();
-    }
-  }
-
-  // Compute the common prefix.
-  StringRef commonPrefix = (*ec)->getName();
-  bool followedByNonIdentifier = false;
-  for (++ec; ec != ecEnd; ++ec) {
-    // Skip deprecated or swift_name'd enumerators.
-    const clang::EnumConstantDecl *elem = *ec;
-    if (hasNonDeprecated) {
-      if (!isNonDeprecatedWithoutCustomName(elem))
-        continue;
-    } else {
-      if (elem->hasAttr<clang::SwiftNameAttr>())
-        continue;
-    }
-
-    commonPrefix = getCommonWordPrefix(commonPrefix, elem->getName(),
-                                       followedByNonIdentifier);
-    if (commonPrefix.empty())
-      break;
-  }
-
-  if (!commonPrefix.empty()) {
-    StringRef checkPrefix = commonPrefix;
-
-    // Account for the 'kConstant' naming convention on enumerators.
-    if (checkPrefix[0] == 'k') {
-      bool canDropK;
-      if (checkPrefix.size() >= 2)
-        canDropK = clang::isUppercase(checkPrefix[1]);
-      else
-        canDropK = !followedByNonIdentifier;
-
-      if (canDropK)
-        checkPrefix = checkPrefix.drop_front();
-    }
-
-    // Don't use importFullName() here, we want to ignore the swift_name
-    // and swift_private attributes.
-    StringRef enumNameStr = decl->getName();
-    StringRef commonWithEnum = getCommonPluralPrefix(checkPrefix,
-                                                     enumNameStr);
-    size_t delta = commonPrefix.size() - checkPrefix.size();
-
-    // Account for the 'EnumName_Constant' convention on enumerators.
-    if (commonWithEnum.size() < checkPrefix.size() &&
-        checkPrefix[commonWithEnum.size()] == '_' &&
-        !followedByNonIdentifier) {
-      delta += 1;
-    }
-
-    commonPrefix = commonPrefix.slice(0, commonWithEnum.size() + delta);
-  }
-
-  if (useCache)
-    EnumConstantNamePrefixes.insert({decl, commonPrefix});
-  return commonPrefix;
 }
 
 /// Determine whether the given Clang selector matches the given
@@ -2044,6 +1781,123 @@ considerErrorImport(ClangImporter::Implementation &importer,
   return None;
 }
 
+// Determine whether we should strip the module prefix from a global-scope
+// entity in the given module and with the given base name.
+static unsigned stripModulePrefixLength(
+                  const llvm::StringMap<std::string> &modulePrefixes,
+                  StringRef moduleName,
+                  StringRef baseName) {
+  // Do we have a module prefix for this module?
+  auto prefixPos = modulePrefixes.find(moduleName);
+  if (prefixPos == modulePrefixes.end()) return 0;
+
+  // Is the prefix actually there?
+  if (!baseName.startswith(prefixPos->second)) return 0;
+
+  // Check whether this is a known Foundation entity that conflicts with the
+  // standard library.
+  if (auto known = getKnownFoundationEntity(baseName))
+    if (nameConflictsWithStandardLibrary(*known))
+      return 0;
+
+  // If the character following the prefix is a '_', eat that, too.
+  unsigned prefixLen = prefixPos->second.size();
+  if (prefixLen < baseName.size() && baseName[prefixLen] == '_')
+    ++prefixLen;
+
+  // Make sure we're left with an identifier.
+  if (prefixLen == baseName.size() ||
+      !Lexer::isIdentifier(baseName.substr(prefixLen)))
+    return 0;
+
+  // We can strip the module prefix.
+  return prefixLen;
+}
+
+/// Determine whether we should lowercase the first word of the given value
+/// name.
+static bool shouldLowercaseValueName(StringRef name) {
+  // If we see any lowercase characters, we can lowercase.
+  for (auto c : name) {
+    if (clang::isLowercase(c)) return true;
+  }
+
+  // Otherwise, lowercasing will either be a no-op or we have ALL_CAPS.
+  return false;
+}
+
+/// Returns true if it is expected that the macro is ignored.
+static bool shouldIgnoreMacro(StringRef name, const clang::MacroInfo *macro) {
+  // Ignore include guards.
+  if (macro->isUsedForHeaderGuard())
+    return true;
+
+  // If there are no tokens, there is nothing to convert.
+  if (macro->tokens_empty())
+    return true;
+
+  // Currently we only convert non-function-like macros.
+  if (macro->isFunctionLike())
+    return true;
+
+  // Consult the blacklist of macros to suppress.
+  auto suppressMacro =
+    llvm::StringSwitch<bool>(name)
+#define SUPPRESS_MACRO(NAME) .Case(#NAME, true)
+#include "MacroTable.def"
+    .Default(false);
+
+  if (suppressMacro)
+    return true;
+
+  return false;
+}
+
+bool ClangImporter::shouldIgnoreMacro(StringRef Name,
+                                      const clang::MacroInfo *Macro) {
+  return ::shouldIgnoreMacro(Name, Macro);
+}
+
+Identifier ClangImporter::Implementation::importMacroName(
+             const clang::IdentifierInfo *clangIdentifier,
+             const clang::MacroInfo *macro,
+             clang::ASTContext &clangCtx) {
+  // If we're supposed to ignore this macro, return an empty identifier.
+  if (::shouldIgnoreMacro(clangIdentifier->getName(), macro))
+    return Identifier();
+
+  // If we aren't omitting needless words, no transformation is applied to the
+  // name.
+  StringRef name = clangIdentifier->getName();
+  if (!OmitNeedlessWords) return SwiftContext.getIdentifier(name);
+
+  // Determine which module defines this macro.
+  StringRef moduleName;
+  if (auto moduleID = macro->getOwningModuleID()) {
+    if (auto module = clangCtx.getExternalSource()->getModule(moduleID))
+      moduleName = module->getTopLevelModuleName();
+  }
+
+  if (moduleName.empty())
+    moduleName = clangCtx.getLangOpts().CurrentModule;
+
+  // Check whether we have a prefix to strip.
+  unsigned prefixLen = stripModulePrefixLength(ModulePrefixes, moduleName,
+                                               name);
+  if (prefixLen == 0) return SwiftContext.getIdentifier(name);
+
+  // Strip the prefix.
+  name = name.substr(prefixLen);
+
+  // If we should lowercase, do so.
+  StringScratchSpace scratch;
+  if (shouldLowercaseValueName(name))
+    name = camel_case::toLowercaseInitialisms(name, scratch);
+
+  // We're done.
+  return SwiftContext.getIdentifier(name);
+}
+
 auto ClangImporter::Implementation::importFullName(
        const clang::NamedDecl *D,
        ImportNameOptions options,
@@ -2066,7 +1920,7 @@ auto ClangImporter::Implementation::importFullName(
     // scope, depending how their enclosing enumeration is imported.
     if (isa<clang::EnumConstantDecl>(D)) {
       auto enumDecl = cast<clang::EnumDecl>(dc);
-      switch (classifyEnum(clangSema.getPreprocessor(), enumDecl)) {
+      switch (getEnumKind(enumDecl, &clangSema.getPreprocessor())) {
       case EnumKind::Enum:
       case EnumKind::Options:
         // Enums are mapped to Swift enums, Options to Swift option sets.
@@ -2091,37 +1945,6 @@ auto ClangImporter::Implementation::importFullName(
       *effectiveContext = category->getClassInterface();
     }
   }
-
-  // Local function that forms a DeclName from the given strings.
-  auto formDeclName = [&](StringRef baseName,
-                          ArrayRef<StringRef> argumentNames,
-                          bool isFunction) -> DeclName {
-    // We cannot import when the base name is not an identifier.
-    if (!Lexer::isIdentifier(baseName))
-      return DeclName();
-
-    // Get the identifier for the base name.
-    Identifier baseNameId = SwiftContext.getIdentifier(baseName);
-
-    // For non-functions, just use the base name.
-    if (!isFunction) return baseNameId;
-
-    // For functions, we need to form a complete name.
-
-    // Convert the argument names.
-    SmallVector<Identifier, 4> argumentNameIds;
-    for (auto argName : argumentNames) {
-      if (argumentNames.empty() || !Lexer::isIdentifier(argName)) {
-        argumentNameIds.push_back(Identifier());
-        continue;
-      }
-      
-      argumentNameIds.push_back(SwiftContext.getIdentifier(argName));
-    }
-
-    // Build the result.
-    return DeclName(SwiftContext, baseNameId, argumentNameIds);
-  };
 
   // If we have a swift_name attribute, use that.
   if (auto *nameAttr = D->getAttr<clang::SwiftNameAttr>()) {
@@ -2164,7 +1987,8 @@ auto ClangImporter::Implementation::importFullName(
       if (baseName.empty()) return result;
       
       result.HasCustomName = true;
-      result.Imported = formDeclName(baseName, argumentNames, isFunctionName);
+      result.Imported = formDeclName(SwiftContext, baseName, argumentNames,
+                                     isFunctionName);
 
       if (method) {
         // Get the parameters.
@@ -2204,7 +2028,7 @@ auto ClangImporter::Implementation::importFullName(
   case clang::DeclarationName::CXXOperatorName:
   case clang::DeclarationName::CXXUsingDirective:
     // Handling these is part of C++ interoperability.
-    return result;
+    llvm_unreachable("unhandled C++ interoperability");
 
   case clang::DeclarationName::Identifier:
     // Map the identifier.
@@ -2219,6 +2043,17 @@ auto ClangImporter::Implementation::importFullName(
       }
     }
 
+    // For C functions, create empty argument names.
+    if (auto function = dyn_cast<clang::FunctionDecl>(D)) {
+      isFunction = true;
+      params = { function->param_begin(), function->param_end() };
+      for (auto param : params) {
+        (void)param;
+        argumentNames.push_back(StringRef());
+      }
+      if (function->isVariadic())
+        argumentNames.push_back(StringRef());
+    }
     break;
 
   case clang::DeclarationName::ObjCMultiArgSelector:
@@ -2336,10 +2171,78 @@ auto ClangImporter::Implementation::importFullName(
   // Enumeration constants may have common prefixes stripped.
   if (isa<clang::EnumConstantDecl>(D)) {
     auto enumDecl = cast<clang::EnumDecl>(D->getDeclContext());
-    StringRef removePrefix = getEnumConstantNamePrefix(clangSema, enumDecl);
+    StringRef removePrefix =
+        getEnumConstantNamePrefix(enumDecl, &clangSema.getPreprocessor());
     if (baseName.startswith(removePrefix))
       baseName = baseName.substr(removePrefix.size());
   }
+
+  auto hasConflict = [&](const clang::IdentifierInfo *proposedName,
+                         const clang::TypedefNameDecl *cfTypedef) -> bool {
+    // Test to see if there is a value with the same name as 'proposedName'
+    // in the same module as the decl
+    // FIXME: This will miss macros.
+    auto clangModule = getClangSubmoduleForDecl(D);
+    if (clangModule.hasValue() && clangModule.getValue())
+      clangModule = clangModule.getValue()->getTopLevelModule();
+
+    auto conflicts = [&](const clang::Decl *OtherD) -> bool {
+      // If these are simply redeclarations, they do not conflict.
+      if (D->getCanonicalDecl() == OtherD->getCanonicalDecl()) return false;
+
+      // If we have a CF typedef, check whether the "other"
+      // declaration we found is just the opaque type behind it. If
+      // so, it does not conflict.
+      if (cfTypedef) {
+        if (auto cfPointerTy =
+              cfTypedef->getUnderlyingType()->getAs<clang::PointerType>()) {
+          if (auto tagDecl = cfPointerTy->getPointeeType()->getAsTagDecl()) {
+            if (tagDecl->getCanonicalDecl() == OtherD)
+              return false;
+          }
+        }
+      }
+
+      auto declModule = getClangSubmoduleForDecl(OtherD);
+      if (!declModule.hasValue())
+        return false;
+
+      // Handle the bridging header case. This is pretty nasty since things
+      // can get added to it *later*, but there's not much we can do.
+      if (!declModule.getValue())
+        return *clangModule == nullptr;
+      return *clangModule == declModule.getValue()->getTopLevelModule();
+    };
+
+    // Allow this lookup to find hidden names.  We don't want the
+    // decision about whether to rename the decl to depend on
+    // what exactly the user has imported.  Indeed, if we're being
+    // asked to resolve a serialization cross-reference, the user
+    // may not have imported this module at all, which means a
+    // normal lookup wouldn't even find the decl!
+    //
+    // Meanwhile, we don't need to worry about finding unwanted
+    // hidden declarations from different modules because we do a
+    // module check before deciding that there's a conflict.
+    clang::LookupResult lookupResult(clangSema, proposedName,
+                                     clang::SourceLocation(),
+                                     clang::Sema::LookupOrdinaryName);
+    lookupResult.setAllowHidden(true);
+    lookupResult.suppressDiagnostics();
+
+    if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
+      if (std::any_of(lookupResult.begin(), lookupResult.end(), conflicts))
+        return true;
+    }
+
+    lookupResult.clear(clang::Sema::LookupTagName);
+    if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
+      if (std::any_of(lookupResult.begin(), lookupResult.end(), conflicts))
+        return true;
+    }
+
+    return false;
+  };
 
   // Objective-C protocols may have the suffix "Protocol" appended if
   // the non-suffixed name would conflict with another entity in the
@@ -2347,54 +2250,7 @@ auto ClangImporter::Implementation::importFullName(
   SmallString<16> baseNameWithProtocolSuffix;
   if (auto objcProto = dyn_cast<clang::ObjCProtocolDecl>(D)) {
     if (objcProto->hasDefinition()) {
-      // Test to see if there is a value with the same name as the protocol
-      // in the same module.
-      // FIXME: This will miss macros.
-      auto clangModule = getClangSubmoduleForDecl(objcProto);
-      if (clangModule.hasValue() && clangModule.getValue())
-        clangModule = clangModule.getValue()->getTopLevelModule();
-
-      auto isInSameModule = [&](const clang::Decl *D) -> bool {
-        auto declModule = getClangSubmoduleForDecl(D);
-        if (!declModule.hasValue())
-          return false;
-        // Handle the bridging header case. This is pretty nasty since things
-        // can get added to it *later*, but there's not much we can do.
-        if (!declModule.getValue())
-          return *clangModule == nullptr;
-        return *clangModule == declModule.getValue()->getTopLevelModule();
-      };
-
-      // Allow this lookup to find hidden names.  We don't want the
-      // decision about whether to rename the protocol to depend on
-      // what exactly the user has imported.  Indeed, if we're being
-      // asked to resolve a serialization cross-reference, the user
-      // may not have imported this module at all, which means a
-      // normal lookup wouldn't even find the protocol!
-      //
-      // Meanwhile, we don't need to worry about finding unwanted
-      // hidden declarations from different modules because we do a
-      // module check before deciding that there's a conflict.
-      bool hasConflict = false;
-      clang::LookupResult lookupResult(clangSema, D->getDeclName(),
-                                       clang::SourceLocation(),
-                                       clang::Sema::LookupOrdinaryName);
-      lookupResult.setAllowHidden(true);
-      lookupResult.suppressDiagnostics();
-
-      if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
-        hasConflict = std::any_of(lookupResult.begin(), lookupResult.end(),
-                                  isInSameModule);
-      }
-      if (!hasConflict) {
-        lookupResult.clear(clang::Sema::LookupTagName);
-        if (clangSema.LookupName(lookupResult, /*scope=*/nullptr)) {
-          hasConflict = std::any_of(lookupResult.begin(), lookupResult.end(),
-                                    isInSameModule);
-        }
-      }
-
-      if (hasConflict) {
+      if (hasConflict(objcProto->getIdentifier(), nullptr)) {
         baseNameWithProtocolSuffix = baseName;
         baseNameWithProtocolSuffix += SWIFT_PROTOCOL_SUFFIX;
         baseName = baseNameWithProtocolSuffix;
@@ -2404,6 +2260,7 @@ auto ClangImporter::Implementation::importFullName(
 
   // Typedef declarations might be CF types that will drop the "Ref"
   // suffix.
+  clang::ASTContext &clangCtx = clangSema.Context;
   bool aliasIsFunction = false;
   bool aliasIsInitializer = false;
   StringRef aliasBaseName;
@@ -2411,14 +2268,21 @@ auto ClangImporter::Implementation::importFullName(
   if (auto typedefNameDecl = dyn_cast<clang::TypedefNameDecl>(D)) {
     auto swiftName = getCFTypeName(typedefNameDecl, &aliasBaseName);
     if (!swiftName.empty()) {
-      baseName = swiftName;
+      if (!aliasBaseName.empty() &&
+          hasConflict(&clangCtx.Idents.get(swiftName), typedefNameDecl)) {
+        // Use the alias name (the "Ref" name), only.
+        baseName = aliasBaseName;
+        aliasBaseName = StringRef();
+      } else {
+        // Adopt the requested name.
+        baseName = swiftName;
+      }
     }
   }
 
   // Local function to determine whether the given declaration is subject to
   // a swift_private attribute.
-  auto clangSemaPtr = &clangSema;
-  auto hasSwiftPrivate = [clangSemaPtr](const clang::NamedDecl *D) {
+  auto hasSwiftPrivate = [&clangSema, this](const clang::NamedDecl *D) {
     if (D->hasAttr<clang::SwiftPrivateAttr>())
       return true;
 
@@ -2426,7 +2290,7 @@ auto ClangImporter::Implementation::importFullName(
     // private if the parent enum is marked private.
     if (auto *ECD = dyn_cast<clang::EnumConstantDecl>(D)) {
       auto *ED = cast<clang::EnumDecl>(ECD->getDeclContext());
-      switch (classifyEnum(clangSemaPtr->getPreprocessor(), ED)) {
+      switch (getEnumKind(ED, &clangSema.getPreprocessor())) {
         case EnumKind::Constants:
         case EnumKind::Unknown:
           if (ED->hasAttr<clang::SwiftPrivateAttr>())
@@ -2446,7 +2310,6 @@ auto ClangImporter::Implementation::importFullName(
   };
 
   // Omit needless words.
-  clang::ASTContext &clangCtx = clangSema.Context;
   StringScratchSpace omitNeedlessWordsScratch;
   if (OmitNeedlessWords) {
     // Objective-C properties.
@@ -2490,6 +2353,37 @@ auto ClangImporter::Implementation::importFullName(
         method->hasRelatedResultType(),
         method->isInstanceMethod(),
         omitNeedlessWordsScratch);
+    }
+
+    // Check whether the module in which the declaration resides has a
+    // module prefix. If so, strip that prefix off when present.
+    if (D->getDeclContext()->getRedeclContext()->isFileContext() &&
+        D->getDeclName().getNameKind() == clang::DeclarationName::Identifier) {
+      // Find the original declaration, from which we can determine
+      // the owning module.
+      const clang::Decl *owningD = D->getCanonicalDecl();
+      if (auto def = getDefinitionForClangTypeDecl(D)) {
+        if (*def)
+          owningD = *def;
+      }
+
+      std::string moduleName;
+      if (auto module = owningD->getImportedOwningModule())
+        moduleName = module->getTopLevelModuleName();
+      else
+        moduleName = owningD->getASTContext().getLangOpts().CurrentModule;
+      if (unsigned prefixLen = stripModulePrefixLength(ModulePrefixes,
+                                                       moduleName, baseName)) {
+        // Strip off the prefix.
+        baseName = baseName.substr(prefixLen);
+
+        // If the result is a value, lowercase it.
+        if (isa<clang::ValueDecl>(D) && shouldLowercaseValueName(baseName)) {
+          baseName =
+            camel_case::toLowercaseInitialisms(baseName,
+                                               omitNeedlessWordsScratch);
+        }
+      }
     }
   }
 
@@ -2545,8 +2439,9 @@ auto ClangImporter::Implementation::importFullName(
     }
   }
 
-  result.Imported = formDeclName(baseName, argumentNames, isFunction);
-  result.Alias = formDeclName(aliasBaseName, aliasArgumentNames,
+  result.Imported = formDeclName(SwiftContext, baseName, argumentNames,
+                                 isFunction);
+  result.Alias = formDeclName(SwiftContext, aliasBaseName, aliasArgumentNames,
                               aliasIsFunction);
   return result;
 }
@@ -3423,12 +3318,13 @@ void ClangImporter::lookupBridgingHeaderDecls(
       }
     }
   }
-  ASTContext &Ctx = Impl.SwiftContext;
+
+  auto &ClangCtx = Impl.getClangASTContext();
   auto &ClangPP = Impl.getClangPreprocessor();
   for (clang::IdentifierInfo *II : Impl.BridgeHeaderMacros) {
     if (auto *MI = ClangPP.getMacroInfo(II)) {
       if (filter(MI)) {
-        Identifier Name = Ctx.getIdentifier(II->getName());
+        Identifier Name = Impl.importMacroName(II, MI, ClangCtx);
         if (Decl *imported = Impl.importMacro(Name, MI))
           receiver(imported);
       }
@@ -3444,7 +3340,6 @@ bool ClangImporter::lookupDeclsFromHeader(StringRef Filename,
   if (!File)
     return true;
 
-  ASTContext &Ctx = Impl.SwiftContext;
   auto &ClangCtx = getClangASTContext();
   auto &ClangSM = ClangCtx.getSourceManager();
   auto &ClangPP = getClangPreprocessor();
@@ -3506,7 +3401,7 @@ bool ClangImporter::lookupDeclsFromHeader(StringRef Filename,
           auto *II = const_cast<clang::IdentifierInfo*>(MD->getName());
           if (auto *MI = ClangPP.getMacroInfo(II)) {
             if (filter(MI)) {
-              Identifier Name = Ctx.getIdentifier(II->getName());
+              Identifier Name = Impl.importMacroName(II, MI, ClangCtx);
               if (Decl *imported = Impl.importMacro(Name, MI))
                 receiver(imported);
             }
@@ -3810,6 +3705,59 @@ void ClangModuleUnit::lookupClassMembers(Module::AccessPathTy accessPath,
   }
 }
 
+void ClangModuleUnit::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  // FIXME: Ignore submodules, which are empty for now.
+  if (clangModule && clangModule->isSubModule())
+    return;
+
+  // Map the selector into a Clang selector.
+  auto clangSelector = owner.Impl.exportSelector(selector);
+  if (clangSelector.isNull()) return;
+
+  // Collect all of the Objective-C methods with this selector.
+  SmallVector<clang::ObjCMethodDecl *, 8> objcMethods;
+  auto &clangSema = owner.Impl.getClangSema();
+  clangSema.CollectMultipleMethodsInGlobalPool(clangSelector,
+                                               objcMethods,
+                                               /*instance=*/true);
+  clangSema.CollectMultipleMethodsInGlobalPool(clangSelector,
+                                               objcMethods,
+                                               /*instance=*/false);
+
+  // Import the methods.
+  auto &clangCtx = clangSema.getASTContext();
+  for (auto objcMethod : objcMethods) {
+    // Verify that this method came from this module.
+    auto owningClangModule = getClangOwningModule(objcMethod, clangCtx);
+    if (owningClangModule)
+      owningClangModule = owningClangModule->getTopLevelModule();
+
+    if (owningClangModule != clangModule) continue;
+
+    // If we found a property accessor, import the property.
+    if (objcMethod->isPropertyAccessor())
+      (void)owner.Impl.importDecl(objcMethod->findPropertyDecl(true));
+
+    // Import it.
+    // FIXME: Retrying a failed import works around recursion bugs in the Clang
+    // importer.
+    auto imported = owner.Impl.importDecl(objcMethod);
+    if (!imported) imported = owner.Impl.importDecl(objcMethod);
+    if (!imported) continue;
+
+    if (auto func = dyn_cast<AbstractFunctionDecl>(imported))
+      results.push_back(func);
+
+    // If there is an alternate declaration, also look at it.
+    if (auto alternate = owner.Impl.getAlternateDecl(imported)) {
+      if (auto func = dyn_cast<AbstractFunctionDecl>(alternate))
+        results.push_back(func);
+    }
+  }
+}
+
 void ClangModuleUnit::collectLinkLibraries(
     Module::LinkLibraryCallback callback) const {
   if (!clangModule)
@@ -3866,11 +3814,6 @@ std::string ClangImporter::getClangModuleHash() const {
 
 Decl *ClangImporter::importDeclCached(const clang::NamedDecl *ClangDecl) {
   return Impl.importDeclCached(ClangDecl);
-}
-
-bool ClangImporter::shouldIgnoreMacro(StringRef Name,
-                                      const clang::MacroInfo *Macro) {
-  return Impl.shouldIgnoreMacro(Name, Macro);
 }
 
 void ClangImporter::printStatistics() const {
@@ -4119,7 +4062,8 @@ void ClangImporter::getMangledName(raw_ostream &os,
 // ---------------------------------------------------------------------------
 
 clang::ModuleFileExtensionMetadata
-ClangImporter::Implementation::getExtensionMetadata() const {
+ClangImporter::Implementation::SwiftNameLookupExtension::
+getExtensionMetadata() const {
   clang::ModuleFileExtensionMetadata metadata;
   metadata.BlockName = "swift.lookup";
   metadata.MajorVersion = SWIFT_LOOKUP_TABLE_VERSION_MAJOR;
@@ -4128,18 +4072,20 @@ ClangImporter::Implementation::getExtensionMetadata() const {
   return metadata;
 }
 
-llvm::hash_code ClangImporter::Implementation::hashExtension(
-                  llvm::hash_code code) const {
+llvm::hash_code
+ClangImporter::Implementation::SwiftNameLookupExtension::hashExtension(
+   llvm::hash_code code) const {
   return llvm::hash_combine(code, StringRef("swift.lookup"),
                             SWIFT_LOOKUP_TABLE_VERSION_MAJOR,
                             SWIFT_LOOKUP_TABLE_VERSION_MINOR,
-                            OmitNeedlessWords,
-                            InferDefaultArguments);
+                            Impl.OmitNeedlessWords,
+                            Impl.InferDefaultArguments);
 }
 
 std::unique_ptr<clang::ModuleFileExtensionWriter>
-ClangImporter::Implementation::createExtensionWriter(clang::ASTWriter &writer) {
-  // Local function to populate the lookup table.
+ClangImporter::Implementation::SwiftNameLookupExtension::createExtensionWriter(
+    clang::ASTWriter &writer) {
+    // Local function to populate the lookup table.
   auto populateTable = [this](clang::Sema &sema, SwiftLookupTable &table) {
     for (auto decl
            : sema.Context.getTranslationUnitDecl()->noload_decls()) {
@@ -4151,11 +4097,11 @@ ClangImporter::Implementation::createExtensionWriter(clang::ASTWriter &writer) {
       if (!named) continue;
 
       // Add this entry to the lookup table.
-      addEntryToLookupTable(sema, table, named);
+      Impl.addEntryToLookupTable(sema, table, named);
     }
 
     // Add macros to the lookup table.
-    addMacrosToLookupTable(sema.Context, sema.getPreprocessor(), table);
+    Impl.addMacrosToLookupTable(sema.Context, sema.getPreprocessor(), table);
   };
 
   return std::unique_ptr<clang::ModuleFileExtensionWriter>(
@@ -4163,7 +4109,7 @@ ClangImporter::Implementation::createExtensionWriter(clang::ASTWriter &writer) {
 }
 
 std::unique_ptr<clang::ModuleFileExtensionReader>
-ClangImporter::Implementation::createExtensionReader(
+ClangImporter::Implementation::SwiftNameLookupExtension::createExtensionReader(
   const clang::ModuleFileExtensionMetadata &metadata,
   clang::ASTReader &reader,
   clang::serialization::ModuleFile &mod,
@@ -4176,13 +4122,13 @@ ClangImporter::Implementation::createExtensionReader(
   assert(metadata.MinorVersion == SWIFT_LOOKUP_TABLE_VERSION_MINOR);
 
   // Check whether we already have an entry in the set of lookup tables.
-  auto &entry = LookupTables[mod.ModuleName];
+  auto &entry = Impl.LookupTables[mod.ModuleName];
   if (entry) return nullptr;
 
   // Local function used to remove this entry when the reader goes away.
   std::string moduleName = mod.ModuleName;
   auto onRemove = [this, moduleName]() {
-    LookupTables.erase(moduleName);
+    Impl.LookupTables.erase(moduleName);
   };
 
   // Create the reader.
@@ -4218,7 +4164,7 @@ SwiftLookupTable *ClangImporter::Implementation::findLookupTable(
 ///
 /// FIXME: this is an elaborate hack to badly reflect Clang's
 /// submodule visibility into Swift.
-static bool isVisibleClangEntry(clang::Preprocessor &pp,
+static bool isVisibleClangEntry(clang::ASTContext &ctx,
                                 StringRef name,
                                 SwiftLookupTable::SingleEntry entry) {
   if (auto clangDecl = entry.dyn_cast<clang::NamedDecl *>()) {
@@ -4234,20 +4180,25 @@ static bool isVisibleClangEntry(clang::Preprocessor &pp,
   }
 
   // Check whether the macro is defined.
-  // FIXME: We could get the wrong macro definition here.
-  return pp.isMacroDefined(name);
+  auto clangMacro = entry.get<clang::MacroInfo *>();
+  if (auto moduleID = clangMacro->getOwningModuleID()) {
+    if (auto module = ctx.getExternalSource()->getModule(moduleID)) 
+      return module->NameVisibility == clang::Module::AllVisible;
+  }
+
+  return true;
 }
 
 void ClangImporter::Implementation::lookupValue(
        SwiftLookupTable &table, DeclName name,
        VisibleDeclConsumer &consumer) {
-  auto clangTU = getClangASTContext().getTranslationUnitDecl();
-  auto &clangPP = getClangPreprocessor();
+  auto &clangCtx = getClangASTContext();
+  auto clangTU = clangCtx.getTranslationUnitDecl();
   auto baseName = name.getBaseName().str();
 
   for (auto entry : table.lookup(name.getBaseName().str(), clangTU)) {
     // If the entry is not visible, skip it.
-    if (!isVisibleClangEntry(clangPP, baseName, entry)) continue;
+    if (!isVisibleClangEntry(clangCtx, baseName, entry)) continue;
 
     ValueDecl *decl;
 
@@ -4300,12 +4251,12 @@ void ClangImporter::Implementation::lookupObjCMembers(
        SwiftLookupTable &table,
        DeclName name,
        VisibleDeclConsumer &consumer) {
-  auto &clangPP = getClangPreprocessor();
+  auto &clangCtx = getClangASTContext();
   auto baseName = name.getBaseName().str();
 
   for (auto clangDecl : table.lookupObjCMembers(baseName)) {
     // If the entry is not visible, skip it.
-    if (!isVisibleClangEntry(clangPP, baseName, clangDecl)) continue;
+    if (!isVisibleClangEntry(clangCtx, baseName, clangDecl)) continue;
 
     // Import the declaration.
     auto decl = cast_or_null<ValueDecl>(importDeclReal(clangDecl));

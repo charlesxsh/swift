@@ -1,4 +1,4 @@
-//===--- ModuleFile.cpp - Loading a serialized module -----------*- C++ -*-===//
+//===--- ModuleFile.cpp - Loading a serialized module ---------------------===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -108,6 +108,9 @@ static bool readOptionsBlock(llvm::BitstreamCursor &cursor,
       break;
     case options_block::IS_TESTABLE:
       extendedInfo.setIsTestable(true);
+      break;
+    case options_block::IS_RESILIENT:
+      extendedInfo.setIsResilient(true);
       break;
     default:
       // Unknown options record, possibly for use by a future version of the
@@ -593,6 +596,7 @@ public:
       new (&Comments[i]) SingleRawComment(RawText, StartColumn);
     }
     result.Raw = RawComment(Comments);
+    result.Group = endian::readNext<uint32_t, little, unaligned>(data);
     return result;
   }
 };
@@ -608,6 +612,21 @@ ModuleFile::readDeclCommentTable(ArrayRef<uint64_t> fields,
     SerializedDeclCommentTable::Create(base + tableOffset,
                                        base + sizeof(uint32_t), base,
                                        DeclCommentTableInfo(*this)));
+}
+
+std::unique_ptr<ModuleFile::GroupNameTable>
+ModuleFile::readGroupTable(ArrayRef<uint64_t> Fields, StringRef BlobData) {
+  std::unique_ptr<ModuleFile::GroupNameTable> pMap(
+    new ModuleFile::GroupNameTable);
+  auto Data = reinterpret_cast<const uint8_t *>(BlobData.data());
+  unsigned GroupCount = endian::readNext<uint32_t, little, unaligned>(Data);
+  for (unsigned I = 0; I < GroupCount; I ++) {
+    auto RawSize = endian::readNext<uint32_t, little, unaligned>(Data);
+    auto RawText = StringRef(reinterpret_cast<const char *>(Data), RawSize);
+    Data += RawSize;
+    (*pMap)[I] = RawText;
+  }
+  return std::move(pMap);
 }
 
 bool ModuleFile::readCommentBlock(llvm::BitstreamCursor &cursor) {
@@ -638,6 +657,9 @@ bool ModuleFile::readCommentBlock(llvm::BitstreamCursor &cursor) {
       switch (kind) {
       case comment_block::DECL_COMMENTS:
         DeclCommentTable = readDeclCommentTable(scratch, blobData);
+        break;
+      case comment_block::GROUP_NAMES:
+        GroupNamesMap = readGroupTable(scratch, blobData);
         break;
       default:
         // Unknown index kind, which this version of the compiler won't use.
@@ -1405,6 +1427,25 @@ void ModuleFile::lookupClassMembers(Module::AccessPathTy accessPath,
   }
 }
 
+void ModuleFile::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) {
+  // If we don't have an Objective-C method table, there's nothing to do.
+  if (!ObjCMethods) return;
+
+  // Look for all methods in the module file with this selector.
+  auto known = ObjCMethods->find(selector);
+  if (known == ObjCMethods->end()) return;
+
+  auto found = *known;
+  for (const auto &result : found) {
+    // Deserialize the method and add it to the list.
+    if (auto func = dyn_cast_or_null<AbstractFunctionDecl>(
+                      getDecl(std::get<2>(result))))
+      results.push_back(func);
+  }
+}
+
 void
 ModuleFile::collectLinkLibraries(Module::LinkLibraryCallback callback) const {
   for (auto &lib : LinkLibraries)
@@ -1489,6 +1530,23 @@ Optional<BriefAndRawComment> ModuleFile::getCommentForDecl(const Decl *D) {
   }
 
   return getCommentForDeclByUSR(USRBuffer.str());
+}
+
+Optional<StringRef> ModuleFile::getGroupNameById(unsigned Id) {
+  if(!GroupNamesMap || GroupNamesMap->count(Id) == 0)
+    return None;
+  auto Group = (*GroupNamesMap)[Id];
+  if (Group.empty())
+    return None;
+  return Group;
+}
+
+Optional<StringRef> ModuleFile::getGroupNameForDecl(const Decl *D) {
+  auto Triple = getCommentForDecl(D);
+  if (!Triple.hasValue()) {
+    return None;
+  }
+  return getGroupNameById(Triple.getValue().Group);
 }
 
 Optional<BriefAndRawComment> ModuleFile::getCommentForDeclByUSR(StringRef USR) {

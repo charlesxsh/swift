@@ -1,4 +1,4 @@
-//===--- ImporterImpl.h - Import Clang Modules: Implementation ------------===//
+//===--- ImporterImpl.h - Import Clang Modules: Implementation --*- C++ -*-===//
 //
 // This source file is part of the Swift.org open source project
 //
@@ -17,6 +17,7 @@
 #ifndef SWIFT_CLANG_IMPORTER_IMPL_H
 #define SWIFT_CLANG_IMPORTER_IMPL_H
 
+#include "ImportEnumInfo.h"
 #include "SwiftLookupTable.h"
 #include "swift/ClangImporter/ClangImporter.h"
 #include "swift/AST/ASTContext.h"
@@ -220,30 +221,32 @@ using api_notes::FactoryAsInitKind;
 
 /// \brief Implementation of the Clang importer.
 class LLVM_LIBRARY_VISIBILITY ClangImporter::Implementation 
-  : public LazyMemberLoader, public clang::ModuleFileExtension
+  : public LazyMemberLoader
 {
   friend class ClangImporter;
 
-public:
-  /// \brief Describes how a particular C enumeration type will be imported
-  /// into Swift. All of the possibilities have the same storage
-  /// representation, but can be used in different ways.
-  enum class EnumKind {
-    /// \brief The enumeration type should map to an enum, which means that
-    /// all of the cases are independent.
-    Enum,
-    /// \brief The enumeration type should map to an option set, which means that
-    /// the constants represent combinations of independent flags.
-    Options,
-    /// \brief The enumeration type should map to a distinct type, but we don't
-    /// know the intended semantics of the enum constants, so conservatively
-    /// map them to independent constants.
-    Unknown,
-    /// \brief The enumeration constants should simply map to the appropriate
-    /// integer values.
-    Constants
-  };
+  class SwiftNameLookupExtension : public clang::ModuleFileExtension {
+    Implementation &Impl;
 
+  public:
+    SwiftNameLookupExtension(Implementation &impl) : Impl(impl) { }
+
+    clang::ModuleFileExtensionMetadata getExtensionMetadata() const override;
+    llvm::hash_code hashExtension(llvm::hash_code code) const override;
+
+    std::unique_ptr<clang::ModuleFileExtensionWriter>
+    createExtensionWriter(clang::ASTWriter &writer) override;
+
+    std::unique_ptr<clang::ModuleFileExtensionReader>
+    createExtensionReader(const clang::ModuleFileExtensionMetadata &metadata,
+                          clang::ASTReader &reader,
+                          clang::serialization::ModuleFile &mod,
+                          const llvm::BitstreamCursor &stream) override;
+
+  };
+  friend class SwiftNameLookupExtension;
+
+public:
   Implementation(ASTContext &ctx, const ClangImporterOptions &opts);
   ~Implementation();
 
@@ -261,6 +264,16 @@ public:
     "<bridging-header-import>";
 
 private:
+  /// The Swift lookup table for the bridging header.
+  SwiftLookupTable BridgingHeaderLookupTable;
+
+  /// The Swift lookup tables, per module.
+  ///
+  /// Annoyingly, we list this table early so that it gets torn down after
+  /// the underlying Clang instances that reference it
+  /// (through the Swift name lookup module file extension).
+  llvm::StringMap<std::unique_ptr<SwiftLookupTable>> LookupTables;
+
   /// \brief A count of the number of load module operations.
   /// FIXME: Horrible, horrible hack for \c loadModule().
   unsigned ImportCounter = 0;
@@ -292,12 +305,6 @@ private:
   /// if type checking has begun.
   llvm::PointerIntPair<LazyResolver *, 1, bool> typeResolver;
 
-  /// The Swift lookup table for the bridging header.
-  SwiftLookupTable BridgingHeaderLookupTable;
-
-  /// The Swift lookup tables, per module.
-  llvm::StringMap<std::unique_ptr<SwiftLookupTable>> LookupTables;
-
 public:
   /// \brief Mapping of already-imported declarations.
   llvm::DenseMap<const clang::Decl *, Decl *> ImportedDecls;
@@ -313,6 +320,10 @@ public:
   /// ObjCBool.
   llvm::SmallDenseMap<const clang::TypedefNameDecl *, MappedTypeNameKind, 16>
     SpecialTypedefNames;
+
+  /// A mapping from module names to the prefixes placed on global names
+  /// in that module, e.g., the Foundation module uses the "NS" prefix.
+  llvm::StringMap<std::string> ModulePrefixes;
 
   /// Is the given identifier a reserved name in Swift?
   static bool isSwiftReservedName(StringRef name);
@@ -490,13 +501,38 @@ private:
   /// \brief Cache of the class extensions.
   llvm::DenseMap<ClassDecl *, CachedExtensions> ClassExtensions;
 
+  /// \brief Cache enum infos
+  llvm::DenseMap<const clang::EnumDecl *, importer::EnumInfo> enumInfos;
+
 public:
   /// \brief Keep track of subscript declarations based on getter/setter
   /// pairs.
   llvm::DenseMap<std::pair<FuncDecl *, FuncDecl *>, SubscriptDecl *> Subscripts;
 
-  /// \brief Keep track of enum constant name prefixes in enums.
-  llvm::DenseMap<const clang::EnumDecl *, StringRef> EnumConstantNamePrefixes;
+  importer::EnumInfo getEnumInfo(const clang::EnumDecl *decl,
+                                 clang::Preprocessor *ppOverride = nullptr) {
+    if (enumInfos.count(decl))
+      return enumInfos[decl];
+    // Due to the semaOverride present in importFullName(), we might be using a
+    // decl from a different context.
+    auto &preprocessor = ppOverride ? *ppOverride : getClangPreprocessor();
+
+    importer::EnumInfo enumInfo(decl, preprocessor);
+    enumInfos[decl] = enumInfo;
+    return enumInfo;
+  }
+  importer::EnumKind getEnumKind(const clang::EnumDecl *decl,
+                                 clang::Preprocessor *ppOverride = nullptr) {
+    return getEnumInfo(decl, ppOverride).getKind();
+  }
+
+  /// \brief the prefix to be stripped from the names of the enum constants
+  /// within the given enum.
+  StringRef
+  getEnumConstantNamePrefix(const clang::EnumDecl *decl,
+                            clang::Preprocessor *ppOverride = nullptr) {
+    return getEnumInfo(decl, ppOverride).getConstantNamePrefix();
+  }
 
 private:
   class EnumConstantDenseMapInfo {
@@ -517,11 +553,6 @@ private:
       return lhs == rhs;
     }
   };
-
-  /// Retrieve the prefix to be stripped from the names of the enum constants
-  /// within the given enum.
-  StringRef getEnumConstantNamePrefix(clang::Sema &sema,
-                                      const clang::EnumDecl *enumDecl);
 
 public:
   /// \brief Keep track of enum constant values that have been imported.
@@ -843,6 +874,11 @@ public:
                               clang::DeclContext **effectiveContext = nullptr,
                               clang::Sema *clangSemaOverride = nullptr);
 
+  /// Imports the name of the given Clang macro into Swift.
+  Identifier importMacroName(const clang::IdentifierInfo *clangIdentifier,
+                             const clang::MacroInfo *macro,
+                             clang::ASTContext &clangCtx);
+
   /// \brief Import the given Clang identifier into Swift.
   ///
   /// \param identifier The Clang identifier to map into Swift.
@@ -876,14 +912,6 @@ public:
   /// \returns The imported declaration, or null if the macro could not be
   /// translated into Swift.
   ValueDecl *importMacro(Identifier name, clang::MacroInfo *macro);
-
-  /// Returns true if it is expected that the macro is ignored.
-  bool shouldIgnoreMacro(StringRef name, const clang::MacroInfo *macro);
-
-  /// \brief Classify the given Clang enumeration type to describe how it
-  /// should be imported 
-  static EnumKind classifyEnum(clang::Preprocessor &pp,
-                               const clang::EnumDecl *decl);
 
   /// Import attributes from the given Clang declaration to its Swift
   /// equivalent.
@@ -1278,20 +1306,6 @@ public:
       ASD->setSetterAccessibility(Accessibility::Public);
     return D;
   }
-
-  // Module file extension overrides
-
-  clang::ModuleFileExtensionMetadata getExtensionMetadata() const override;
-  llvm::hash_code hashExtension(llvm::hash_code code) const override;
-
-  std::unique_ptr<clang::ModuleFileExtensionWriter>
-  createExtensionWriter(clang::ASTWriter &writer) override;
-
-  std::unique_ptr<clang::ModuleFileExtensionReader>
-  createExtensionReader(const clang::ModuleFileExtensionMetadata &metadata,
-                        clang::ASTReader &reader,
-                        clang::serialization::ModuleFile &mod,
-                        const llvm::BitstreamCursor &stream) override;
 
   /// Find the lookup table that corresponds to the given Clang module.
   ///

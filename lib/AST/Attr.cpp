@@ -310,6 +310,9 @@ void DeclAttribute::print(ASTPrinter &Printer,
     if (Attr->Obsoleted)
       Printer << ", obsoleted=" << Attr->Obsoleted.getValue().getAsString();
 
+    if (!Attr->Rename.empty())
+      Printer << ", renamed=\"" << Attr->Rename << "\"";
+
     // If there's no message, but this is specifically an imported
     // "unavailable in Swift" attribute, synthesize a message to look good in
     // the generated interface.
@@ -358,6 +361,32 @@ void DeclAttribute::print(ASTPrinter &Printer,
     // Not printed.
     return;
 
+  case DAK_Swift3Migration: {
+    auto attr = cast<Swift3MigrationAttr>(this);
+    Printer << "@swift3_migration(";
+
+    bool printedAny = false;
+    auto printSeparator = [&] {
+      if (printedAny) Printer << ", ";
+      else printedAny = true;
+    };
+
+    if (attr->getRenamed()) {
+      printSeparator();
+      Printer << "renamed=\"" << attr->getRenamed() << "\"";
+    }
+
+    if (!attr->getMessage().empty()) {
+      printSeparator();
+      Printer << "message=\"";
+      Printer << attr->getMessage();
+      Printer << "\"";
+    }
+
+    Printer << ")";
+    break;
+  }
+
   case DAK_SynthesizedProtocol:
     // Not printed.
     return;
@@ -382,10 +411,6 @@ void DeclAttribute::print(ASTPrinter &Printer,
       Printer << ")";
     break;
   }
-
-  case DAK_MigrationId:
-    // Not printed.
-    return;
 
   case DAK_Count:
     llvm_unreachable("exceed declaration attribute kinds");
@@ -479,10 +504,10 @@ StringRef DeclAttribute::getAttrName() const {
     return "<<ObjC bridged>>";
   case DAK_SynthesizedProtocol:
     return "<<synthesized protocol>>";
+  case DAK_Swift3Migration:
+    return "swift3_migration";
   case DAK_WarnUnusedResult:
     return "warn_unused_result";
-  case DAK_MigrationId:
-    return "_migration_id";
   }
   llvm_unreachable("bad DeclAttrKind");
 }

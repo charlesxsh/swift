@@ -175,6 +175,8 @@ FileUnit *SerializedModuleLoader::loadAST(
     M.addFile(*fileUnit);
     if (extendedInfo.isTestable())
       M.setTestingEnabled();
+    if (extendedInfo.isResilient())
+      M.setResilienceEnabled();
 
     auto diagLocOrInvalid = diagLoc.getValueOr(SourceLoc());
     err = loadedModuleFile->associateWithFileContext(fileUnit,
@@ -476,9 +478,20 @@ SerializedASTFile::lookupClassMember(Module::AccessPathTy accessPath,
   File.lookupClassMember(accessPath, name, decls);
 }
 
+void SerializedASTFile::lookupObjCMethods(
+       ObjCSelector selector,
+       SmallVectorImpl<AbstractFunctionDecl *> &results) const {
+  File.lookupObjCMethods(selector, results);
+}
+
 Optional<BriefAndRawComment>
 SerializedASTFile::getCommentForDecl(const Decl *D) const {
   return File.getCommentForDecl(D);
+}
+
+Optional<StringRef>
+SerializedASTFile::getGroupNameForDecl(const Decl *D) const {
+  return File.getGroupNameForDecl(D);
 }
 
 void

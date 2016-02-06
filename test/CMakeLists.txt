@@ -40,7 +40,7 @@ function(get_test_dependencies SDK result_var_name)
   endif()
 
   set(deps_binaries
-      swift swift-ide-test sil-opt swift-llvm-opt swift-demangle sil-extract swift-compress
+      swift swift-ide-test sil-opt swift-llvm-opt swift-demangle sil-extract
       lldb-moduleimport-test)
   if(NOT SWIFT_BUILT_STANDALONE)
     list(APPEND deps_binaries llc)
@@ -115,7 +115,7 @@ if(PYTHONINTERP_FOUND)
     set(SWIFT_ASAN_BUILD TRUE)
   endif()
 
-  set(TEST_MODES optimize_none optimize optimize_unchecked)
+  set(TEST_MODES optimize_none optimize optimize_unchecked non_executable)
 
   foreach(SDK ${SWIFT_SDKS})
     foreach(ARCH ${SWIFT_SDK_${SDK}_ARCHITECTURES})
@@ -147,11 +147,15 @@ if(PYTHONINTERP_FOUND)
         if(NOT TEST_MODE STREQUAL "optimize_none")
           if(TEST_MODE STREQUAL "optimize")
             set(test_mode_target_suffix "-optimize")
-            list(APPEND LIT_ARGS "--param" "run_only_tests=executable_test")
+            list(APPEND LIT_ARGS "--param" "run_only_tests=executable_tests")
           endif()
           if(TEST_MODE STREQUAL "optimize_unchecked")
             set(test_mode_target_suffix "-optimize-unchecked")
-            list(APPEND LIT_ARGS "--param" "run_only_tests=executable_test")
+            list(APPEND LIT_ARGS "--param" "run_only_tests=executable_tests")
+          endif()
+          if(TEST_MODE STREQUAL "non_executable")
+            set(test_mode_target_suffix "-non-executable")
+            list(APPEND LIT_ARGS "--param" "run_only_tests=non_executable_tests")
           endif()
           list(APPEND LIT_ARGS "--param" "swift_test_mode=${TEST_MODE}")
         endif()
@@ -173,7 +177,10 @@ if(PYTHONINTERP_FOUND)
         set(test_dependencies)
         get_test_dependencies("${SDK}" test_dependencies)
         list(APPEND test_dependencies
-            "swift-stdlib-${SWIFT_SDK_${SDK}_LIB_SUBDIR}")
+            "swift-test-stdlib-${SWIFT_SDK_${SDK}_LIB_SUBDIR}")
+
+        set(validation_test_dependencies
+            "swiftStdlibCollectionUnittest-${SWIFT_SDK_${SDK}_LIB_SUBDIR}")
 
         set(test_bin_dir "${CMAKE_CURRENT_BINARY_DIR}${VARIANT_SUFFIX}")
         set(validation_test_bin_dir
@@ -193,11 +200,28 @@ if(PYTHONINTERP_FOUND)
             "${CMAKE_CURRENT_SOURCE_DIR}/../validation-test/lit.site.cfg.in"
             "${validation_test_bin_dir}/lit.site.cfg"
             "validation-test${VARIANT_SUFFIX}.lit.site.cfg")
+        set(profdata_merge_worker
+            "${CMAKE_CURRENT_SOURCE_DIR}/../utils/profdata_merge/main.py")
+
+        if(SWIFT_ANALYZE_CODE_COVERAGE STREQUAL "MERGED")
+          set(command_profdata_merge_start
+            COMMAND "${PYTHON_EXECUTABLE}" "${profdata_merge_worker}"
+                -l "${swift_test_results_dir}/profdata_merge.log"
+                start
+                -o "${swift_test_results_dir}")
+          set(command_profdata_merge_stop
+            COMMAND "${PYTHON_EXECUTABLE}" "${profdata_merge_worker}" stop)
+        else()
+          set(command_profdata_merge_start)
+          set(command_profdata_merge_stop)
+        endif()
 
         add_custom_target("check-swift${test_mode_target_suffix}${VARIANT_SUFFIX}"
             ${command_upload_stdlib}
             ${command_clean_test_results_dir}
+            ${command_profdata_merge_start}
             COMMAND ${lit_command} "${test_bin_dir}"
+            ${command_profdata_merge_stop}
             DEPENDS ${test_dependencies}
             COMMENT "Running Swift tests for ${VARIANT_TRIPLE}"
             ${cmake_3_2_USES_TERMINAL})
@@ -205,18 +229,24 @@ if(PYTHONINTERP_FOUND)
         add_custom_target("check-swift-validation${test_mode_target_suffix}${VARIANT_SUFFIX}"
             ${command_upload_stdlib}
             ${command_clean_test_results_dir}
+            ${command_profdata_merge_start}
             COMMAND ${lit_command} "${validation_test_bin_dir}"
-            DEPENDS ${test_dependencies}
+            ${command_profdata_merge_stop}
+            DEPENDS ${test_dependencies} ${validation_test_dependencies}
             COMMENT "Running Swift validation tests for ${VARIANT_TRIPLE}"
             ${cmake_3_2_USES_TERMINAL})
 
         add_custom_target("check-swift-all${test_mode_target_suffix}${VARIANT_SUFFIX}"
             ${command_upload_stdlib}
             ${command_clean_test_results_dir}
+            ${command_profdata_merge_start}
             COMMAND ${lit_command} "${validation_test_bin_dir}" "${test_bin_dir}"
-            DEPENDS ${test_dependencies}
+            ${command_profdata_merge_stop}
+            DEPENDS ${test_dependencies} ${validation_test_dependencies}
             COMMENT "Running all Swift tests for ${VARIANT_TRIPLE}"
             ${cmake_3_2_USES_TERMINAL})
+
+
       endforeach()
     endforeach()
   endforeach()
@@ -233,6 +263,9 @@ if(PYTHONINTERP_FOUND)
     if(TEST_MODE STREQUAL "optimize_unchecked")
       set(test_mode_target_suffix "-optimize-unchecked")
     endif()
+    if(TEST_MODE STREQUAL "non_executable")
+      set(test_mode_target_suffix "-non-executable")
+    endif()
 
     add_custom_target(check-swift${test_mode_target_suffix}
         DEPENDS "check-swift${test_mode_target_suffix}${SWIFT_PRIMARY_VARIANT_SUFFIX}")
@@ -242,6 +275,7 @@ if(PYTHONINTERP_FOUND)
 
     add_custom_target(check-swift-all${test_mode_target_suffix}
         DEPENDS "check-swift-all${test_mode_target_suffix}${SWIFT_PRIMARY_VARIANT_SUFFIX}")
+
   endforeach()
 
 endif()

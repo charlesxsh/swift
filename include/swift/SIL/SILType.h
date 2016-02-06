@@ -253,30 +253,30 @@ public:
   ///
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isAddressOnly().
-  static bool isAddressOnly(CanType T, SILModule &M);
+  static bool isAddressOnly(CanType T, SILModule &M,
+                            CanGenericSignature Sig,
+                            ResilienceExpansion Expansion);
 
   /// Return true if this type must be returned indirectly.
   ///
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isReturnedIndirectly().
-  static bool isReturnedIndirectly(CanType type, SILModule &M) {
-    return isAddressOnly(type, M);
+  static bool isReturnedIndirectly(CanType type, SILModule &M,
+                                   CanGenericSignature Sig,
+                                   ResilienceExpansion Expansion) {
+    return isAddressOnly(type, M, Sig, Expansion);
   }
 
   /// Return true if this type must be passed indirectly.
   ///
   /// This is equivalent to, but possibly faster than, calling
   /// M.Types.getTypeLowering(type).isPassedIndirectly().
-  static bool isPassedIndirectly(CanType type, SILModule &M) {
-    return isAddressOnly(type, M);
+  static bool isPassedIndirectly(CanType type, SILModule &M,
+                                 CanGenericSignature Sig,
+                                 ResilienceExpansion Expansion) {
+    return isAddressOnly(type, M, Sig, Expansion);
   }
 
-  /// Returns true if this type exposes a fixed layout to the given module's
-  /// resilience domain.
-  ///
-  /// This is currently only implemented for nominal types.
-  bool hasFixedLayout(SILModule &M) const;
-  
   /// True if the type, or the referenced type of an address type, is loadable.
   /// This is the opposite of isAddressOnly.
   bool isLoadable(SILModule &M) const {
@@ -548,7 +548,6 @@ NON_SIL_TYPE(LValue)
 
 CanSILFunctionType getNativeSILFunctionType(SILModule &M,
                         Lowering::AbstractionPattern orig,
-                        CanAnyFunctionType subst,
                         CanAnyFunctionType substInterface,
                         SILDeclRef::Kind kind = SILDeclRef::Kind::Func);
 

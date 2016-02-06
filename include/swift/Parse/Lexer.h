@@ -423,6 +423,7 @@ private:
   void skipHashbang();
 
   void skipSlashStarComment();
+  void lexHash();
   void lexIdentifier();
   void lexDollarIdent();
   void lexOperatorIdentifier();
@@ -438,7 +439,6 @@ private:
   void tryLexEditorPlaceholder();
   const char *findEndOfCurlyQuoteStringLiteral(const char*);
 };
-  
   
 } // end namespace swift
 

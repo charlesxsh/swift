@@ -63,8 +63,12 @@ class SILPassManager {
   llvm::DenseMap<SILFunction *, CompletedPasses> CompletedPassesMap;
 
   /// Set to true when a pass invalidates an analysis.
-  bool currentPassHasInvalidated = false;
-  
+  bool CurrentPassHasInvalidated = false;
+
+  /// True if we need to stop running passes and restart again on the
+  /// same function.
+  bool RestartPipeline = false;
+
 public:
   /// C'tor. It creates and registers all analysis passes, which are defined
   /// in Analysis.def.
@@ -99,6 +103,13 @@ public:
     FunctionWorklist.push_back(F);
   }
 
+
+  /// \brief Restart the function pass pipeline on the same function
+  /// that is currently being processed.
+  void restartWithCurrentFunction(SILTransform *T);
+  void clearRestartPipeline() { RestartPipeline = false; }
+  bool shouldRestartPipeline() { return RestartPipeline; }
+
   ///  \brief Broadcast the invalidation of the module to all analysis.
   void invalidateAnalysis(SILAnalysis::InvalidationKind K) {
     assert(K != SILAnalysis::InvalidationKind::Nothing &&
@@ -108,7 +119,7 @@ public:
       if (!AP->isLocked())
         AP->invalidate(K);
 
-    currentPassHasInvalidated = true;
+    CurrentPassHasInvalidated = true;
 
     // Assume that all functions have changed. Clear all masks of all functions.
     CompletedPassesMap.clear();
@@ -122,7 +133,7 @@ public:
       if (!AP->isLocked())
         AP->invalidate(F, K);
     
-    currentPassHasInvalidated = true;
+    CurrentPassHasInvalidated = true;
     // Any change let all passes run again.
     CompletedPassesMap[F].reset();
   }
@@ -173,7 +184,8 @@ private:
   void runModulePass(SILModuleTransform *SMT);
 
   /// Run the passes in \p FuncTransforms on the function \p F.
-  void runPassesOnFunction(PassList FuncTransforms, SILFunction *F);
+  void runPassesOnFunction(PassList FuncTransforms, SILFunction *F,
+                           bool runToCompletion);
 
   /// Run the passes in \p FuncTransforms. Return true
   /// if the pass manager requested to stop the execution

@@ -37,6 +37,7 @@
 #include "llvm/Support/Allocator.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringMap.h"
+#include "llvm/ADT/StringSwitch.h"
 #include <algorithm>
 #include <memory>
 
@@ -1181,7 +1182,7 @@ bool ASTContext::hasArrayLiteralIntrinsics(LazyResolver *resolver) const {
     && getDeallocateUninitializedArray(resolver);
 }
 
-void ASTContext::addedExternalDecl(Decl *decl) {
+void ASTContext::addExternalDecl(Decl *decl) {
   ExternalDefinitions.insert(decl);
 }
 
@@ -1209,7 +1210,8 @@ ASTContext::createTrivialSubstitutions(BoundGenericType *BGT,
   assert(Params.size() == 1);
   auto Param = Params[0];
   assert(Param->getArchetype() && "Not type-checked yet");
-  Substitution Subst(Param->getArchetype(), BGT->getGenericArgs()[0], {});
+  (void) Param;
+  Substitution Subst(BGT->getGenericArgs()[0], {});
   auto Substitutions = AllocateCopy(llvm::makeArrayRef(Subst));
   auto arena = getArena(BGT->getRecursiveProperties());
   Impl.getArena(arena).BoundGenericSubstitutions
@@ -2274,6 +2276,54 @@ bool ASTContext::diagnoseObjCUnsatisfiedOptReqConflicts(SourceFile &sf) {
                                     Impl.ObjCUnsatisfiedOptReqs.end());
 
   return anyDiagnosed;
+}
+
+Optional<KnownFoundationEntity> swift::getKnownFoundationEntity(StringRef name){
+  return llvm::StringSwitch<Optional<KnownFoundationEntity>>(name)
+#define FOUNDATION_ENTITY(Name) .Case(#Name, KnownFoundationEntity::Name)
+#include "swift/AST/KnownFoundationEntities.def"
+    .Default(None);
+}
+
+bool swift::nameConflictsWithStandardLibrary(KnownFoundationEntity entity) {
+  switch (entity) {
+  case KnownFoundationEntity::NSArray:
+  case KnownFoundationEntity::NSDictionary:
+  case KnownFoundationEntity::NSInteger:
+  case KnownFoundationEntity::NSRange:
+  case KnownFoundationEntity::NSSet:
+  case KnownFoundationEntity::NSString:
+    return true;
+
+  case KnownFoundationEntity::NSCopying:
+  case KnownFoundationEntity::NSError:
+  case KnownFoundationEntity::NSErrorPointer:
+  case KnownFoundationEntity::NSNumber:
+  case KnownFoundationEntity::NSObject:
+  case KnownFoundationEntity::NSStringEncoding:
+  case KnownFoundationEntity::NSUInteger:
+  case KnownFoundationEntity::NSURL:
+  case KnownFoundationEntity::NSZone:
+    return false;
+  }
+}
+
+StringRef ASTContext::getSwiftName(KnownFoundationEntity kind) {
+  StringRef objcName;
+  switch (kind) {
+#define FOUNDATION_ENTITY(Name) case KnownFoundationEntity::Name:  \
+    objcName = #Name;                                             \
+    break;
+#include "swift/AST/KnownFoundationEntities.def"
+  }
+
+  // If we're omitting needless words and the name won't conflict with
+  // something in the standard library, strip the prefix off the Swift
+  // name.
+  if (LangOpts.OmitNeedlessWords && !nameConflictsWithStandardLibrary(kind))
+    return objcName.substr(2);
+
+  return objcName;
 }
 
 void ASTContext::dumpArchetypeContext(ArchetypeType *archetype,

@@ -89,6 +89,20 @@ void RequirementRepr::dump() const {
   llvm::errs() << "\n";
 }
 
+Optional<std::tuple<StringRef, StringRef, RequirementReprKind>>
+RequirementRepr::getAsAnalyzedWrittenString() const {
+  if(AsWrittenString.empty())
+    return None;
+  auto Pair = AsWrittenString.split("==");
+  auto Kind = RequirementReprKind::SameType;
+  if (Pair.second.empty()) {
+    Pair = AsWrittenString.split(":");
+    Kind =  RequirementReprKind::TypeConstraint;
+  }
+  assert(!Pair.second.empty() && "cannot get second type.");
+  return std::make_tuple(Pair.first.trim(), Pair.second.trim(), Kind);
+}
+
 void RequirementRepr::printImpl(raw_ostream &out, bool AsWritten) const {
   auto printTy = [&](const TypeLoc &TyLoc) {
     if (AsWritten && TyLoc.getTypeRepr()) {
@@ -99,21 +113,16 @@ void RequirementRepr::printImpl(raw_ostream &out, bool AsWritten) const {
   };
 
   switch (getKind()) {
-  case RequirementKind::Conformance:
+  case RequirementReprKind::TypeConstraint:
     printTy(getSubjectLoc());
     out << " : ";
     printTy(getConstraintLoc());
     break;
 
-  case RequirementKind::SameType:
+  case RequirementReprKind::SameType:
     printTy(getFirstTypeLoc());
     out << " == ";
     printTy(getSecondTypeLoc());
-    break;
-
-  case RequirementKind::WitnessMarker:
-    out << "witness marker for ";
-    printTy(getFirstTypeLoc());
     break;
   }
 }
@@ -511,6 +520,10 @@ namespace {
         OS << " default=";
         defaultDef.print(OS);
       }
+      
+      if (decl->isRecursive())
+        OS << " <<RECURSIVE>>";
+      
       OS << ")";
     }
 
@@ -789,22 +802,22 @@ namespace {
       switch (P->getDefaultArgumentKind()) {
       case DefaultArgumentKind::None: break;
       case DefaultArgumentKind::Column:
-        printField("default_arg", "__COLUMN__");
+        printField("default_arg", "#column");
         break;
       case DefaultArgumentKind::DSOHandle:
-        printField("default_arg", "__DSO_HANDLE__");
+        printField("default_arg", "#dsohandle");
         break;
       case DefaultArgumentKind::File:
-        printField("default_arg", "__FILE__");
+        printField("default_arg", "#file");
         break;
       case DefaultArgumentKind::Function:
-        printField("default_arg", "__FUNCTION__");
+        printField("default_arg", "#function");
         break;
       case DefaultArgumentKind::Inherited:
         printField("default_arg", "inherited");
         break;
       case DefaultArgumentKind::Line:
-        printField("default_arg", "__LINE__");
+        printField("default_arg", "#line");
         break;
       case DefaultArgumentKind::Nil:
         printField("default_arg", "nil");
@@ -953,7 +966,7 @@ namespace {
       OS.indent(Indent) << "(#if_decl\n";
       Indent += 2;
       for (auto &Clause : ICD->getClauses()) {
-        OS.indent(Indent) << (Clause.Cond ? "(#if:\n" : "#else");
+        OS.indent(Indent) << (Clause.Cond ? "(#if:\n" : "\n(#else:\n");
         if (Clause.Cond)
           printRec(Clause.Cond);
         
@@ -961,6 +974,8 @@ namespace {
           OS << '\n';
           printRec(D);
         }
+
+        OS << ')';
       }
     
       Indent -= 2;
@@ -1027,7 +1042,7 @@ void Decl::dump(raw_ostream &OS, unsigned Indent) const {
   llvm::SaveAndRestore<bool> X(getASTContext().LangOpts.DebugConstraintSolver,
                                true);
   PrintDecl(OS, Indent).visit(const_cast<Decl *>(this));
-  llvm::errs() << '\n';
+  OS << '\n';
 }
 
 /// Print the given declaration context (with its parents).
@@ -1588,18 +1603,18 @@ public:
     printCommon(E, "magic_identifier_literal_expr") << " kind=";
     switch (E->getKind()) {
     case MagicIdentifierLiteralExpr::File:
-      OS << "__FILE__ encoding=";
+      OS << "#file encoding=";
       printStringEncoding(E->getStringEncoding());
       break;
 
     case MagicIdentifierLiteralExpr::Function:
-      OS << "__FUNCTION__ encoding=";
+      OS << "#function encoding=";
       printStringEncoding(E->getStringEncoding());
       break;
         
-    case MagicIdentifierLiteralExpr::Line:  OS << "__LINE__"; break;
-    case MagicIdentifierLiteralExpr::Column:  OS << "__COLUMN__"; break;
-    case MagicIdentifierLiteralExpr::DSOHandle:  OS << "__DSO_HANDLE__"; break;
+    case MagicIdentifierLiteralExpr::Line:  OS << "#line"; break;
+    case MagicIdentifierLiteralExpr::Column:  OS << "#column"; break;
+    case MagicIdentifierLiteralExpr::DSOHandle:  OS << "#dsohandle"; break;
     }
     OS << ')';
   }
@@ -1646,11 +1661,6 @@ public:
     printCommon(E, "other_constructor_ref_expr")
       << " decl=";
     E->getDeclRef().dump(OS);
-    OS << ')';
-  }
-  void visitUnresolvedConstructorExpr(UnresolvedConstructorExpr *E) {
-    printCommon(E, "unresolved_constructor") << '\n';
-    printRec(E->getSubExpr());
     OS << ')';
   }
   void visitOverloadedDeclRefExpr(OverloadedDeclRefExpr *E) {
@@ -1803,15 +1813,6 @@ public:
   void visitUnresolvedDotExpr(UnresolvedDotExpr *E) {
     printCommon(E, "unresolved_dot_expr")
       << " field '" << E->getName() << "'";
-    if (E->getBase()) {
-      OS << '\n';
-      printRec(E->getBase());
-    }
-    OS << ')';
-  }
-  void visitUnresolvedSelectorExpr(UnresolvedSelectorExpr *E) {
-    printCommon(E, "unresolved_selector_expr")
-      << " selector '" << E->getName() << "'";
     if (E->getBase()) {
       OS << '\n';
       printRec(E->getBase());
@@ -1988,6 +1989,7 @@ public:
   void visitCaptureListExpr(CaptureListExpr *E) {
     printCommon(E, "capture_list");
     for (auto capture : E->getCaptureList()) {
+      OS << '\n';
       Indent += 2;
       printRec(capture.Var);
       printRec(capture.Init);
@@ -2012,6 +2014,8 @@ public:
     printClosure(E, "closure_expr");
     if (E->hasSingleExpressionBody())
       OS << " single-expression";
+    if (E->isVoidConversionClosure())
+      OS << " void-conversion";
     
     if (E->getParameters()) {
       OS << '\n';
@@ -2094,9 +2098,9 @@ public:
     printCommon(E, name) << ' ';
     if (auto checkedCast = dyn_cast<CheckedCastExpr>(E))
       OS << getCheckedCastKindName(checkedCast->getCastKind()) << ' ';
-    OS << "writtenType=";
+    OS << "writtenType='";
     E->getCastTypeLoc().getType().print(OS);
-    OS << '\n';
+    OS << "'\n";
     printRec(E->getSubExpr());
     OS << ')';
   }
@@ -2178,6 +2182,16 @@ public:
       OS << '\n';
       printRec(ExpTyR);
     }
+    OS << ')';
+  }
+  void visitObjCSelectorExpr(ObjCSelectorExpr *E) {
+    printCommon(E, "objc_selector_expr") << " decl=";
+    if (auto method = E->getMethod())
+      method->dumpRef(OS);
+    else
+      OS << "<unresolved>";
+    OS << '\n';
+    printRec(E->getSubExpr());
     OS << ')';
   }
 };
@@ -2321,7 +2335,7 @@ public:
   void visitNamedTypeRepr(NamedTypeRepr *T) {
     printCommon(T, "type_named");
     if (T->hasName())
-      OS << " id='" << T->getName();
+      OS << " id=" << T->getName();
     if (T->getTypeRepr()) {
       OS << '\n';
       printRec(T->getTypeRepr());
@@ -2543,19 +2557,19 @@ namespace {
           break;
 
         case DefaultArgumentKind::Column:
-          printField("default_arg", "__COLUMN__");
+          printField("default_arg", "#column");
           break;
 
         case DefaultArgumentKind::DSOHandle:
-          printField("default_arg", "__DSO_HANDLE__");
+          printField("default_arg", "#dsohandle");
           break;
 
         case DefaultArgumentKind::File:
-          printField("default_arg", "__FILE__");
+          printField("default_arg", "#file");
           break;
 
         case DefaultArgumentKind::Function:
-          printField("default_arg", "__FUNCTION__");
+          printField("default_arg", "#function");
           break;
 
         case DefaultArgumentKind::Inherited:
@@ -2563,7 +2577,7 @@ namespace {
           break;
 
         case DefaultArgumentKind::Line:
-          printField("default_arg", "__LINE__");
+          printField("default_arg", "#line");
           break;
 
         case DefaultArgumentKind::Nil:

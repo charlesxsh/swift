@@ -123,13 +123,13 @@ internal func _print<Target: OutputStreamType>(
 ) {
   var prefix = ""
   output._lock()
+  defer { output._unlock() }
   for item in items {
     output.write(prefix)
     _print_unlocked(item, &output)
     prefix = separator
   }
   output.write(terminator)
-  output._unlock()
 }
 
 @inline(never)
@@ -142,27 +142,22 @@ internal func _debugPrint<Target: OutputStreamType>(
 ) {
   var prefix = ""
   output._lock()
+  defer { output._unlock() }
   for item in items {
     output.write(prefix)
     _debugPrint_unlocked(item, &output)
     prefix = separator
   }
   output.write(terminator)
-  output._unlock()
 }
 
 //===----------------------------------------------------------------------===//
 //===--- Migration Aids ---------------------------------------------------===//
 
-@available(*, unavailable, message="Please wrap your tuple argument in parentheses: 'print((...))'")
-public func print<T>(_: T) {}
-@available(*, unavailable, message="Please wrap your tuple argument in parentheses: 'debugPrint((...))'")
-public func debugPrint<T>(_: T) {}
-
 @available(*, unavailable, message="Please use 'terminator: \"\"' instead of 'appendNewline: false': 'print((...), terminator: \"\")'")
-public func print<T>(_: T, appendNewline: Bool) {}
+public func print<T>(_: T, appendNewline: Bool = true) {}
 @available(*, unavailable, message="Please use 'terminator: \"\"' instead of 'appendNewline: false': 'debugPrint((...), terminator: \"\")'")
-public func debugPrint<T>(_: T, appendNewline: Bool) {}
+public func debugPrint<T>(_: T, appendNewline: Bool = true) {}
 
 
 //===--- FIXME: Not working due to <rdar://22101775> ----------------------===//
@@ -172,10 +167,10 @@ public func print<T>(_: T, inout _: OutputStreamType) {}
 public func debugPrint<T>(_: T, inout _: OutputStreamType) {}
 
 @available(*, unavailable, message="Please use 'terminator: \"\"' instead of 'appendNewline: false' and use the 'toStream' label for the target stream: 'print((...), terminator: \"\", toStream: &...)'")
-public func print<T>(_: T, inout _: OutputStreamType, appendNewline: Bool) {}
+public func print<T>(_: T, inout _: OutputStreamType, appendNewline: Bool = true) {}
 @available(*, unavailable, message="Please use 'terminator: \"\"' instead of 'appendNewline: false' and use the 'toStream' label for the target stream: 'debugPrint((...), terminator: \"\", toStream: &...)'")
 public func debugPrint<T>(
-  _: T, inout _: OutputStreamType, appendNewline: Bool
+  _: T, inout _: OutputStreamType, appendNewline: Bool = true
 ) {}
 //===----------------------------------------------------------------------===//
 //===----------------------------------------------------------------------===//

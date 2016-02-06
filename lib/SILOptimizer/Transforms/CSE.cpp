@@ -129,6 +129,10 @@ public:
     return llvm::hash_combine(X->getKind(), X->getOperand(), X->getField());
   }
 
+  hash_code visitProjectBoxInst(ProjectBoxInst *X) {
+    return llvm::hash_combine(X->getKind(), X->getOperand());
+  }
+
   hash_code visitRefToRawPointerInst(RefToRawPointerInst *X) {
     return llvm::hash_combine(X->getKind(), X->getOperand());
   }
@@ -537,7 +541,7 @@ bool CSE::processNode(DominanceInfoNode *Node) {
     if (SILValue V = simplifyInstruction(Inst)) {
       DEBUG(llvm::dbgs() << "SILCSE SIMPLIFY: " << *Inst << "  to: " << *V
             << '\n');
-      SILValue(Inst, 0).replaceAllUsesWith(V);
+      Inst->replaceAllUsesWith(V);
       Inst->eraseFromParent();
       Changed = true;
       ++NumSimplify;
@@ -619,7 +623,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
     return !WMI->isVolatile();
   }
   if (auto *EMI = dyn_cast<ExistentialMetatypeInst>(Inst)) {
-    return !EMI->getOperand().getType().isAddress();
+    return !EMI->getOperand()->getType().isAddress();
   }
   switch (Inst->getKind()) {
     case ValueKind::FunctionRefInst:
@@ -637,6 +641,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
     case ValueKind::ValueMetatypeInst:
     case ValueKind::ObjCProtocolInst:
     case ValueKind::RefElementAddrInst:
+    case ValueKind::ProjectBoxInst:
     case ValueKind::IndexRawPointerInst:
     case ValueKind::IndexAddrInst:
     case ValueKind::PointerToAddressInst:

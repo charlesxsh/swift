@@ -2,7 +2,6 @@
 // REQUIRES: executable_test
 
 // XFAIL: interpret
-// XFAIL: linux
 
 import StdlibUnittest
 
@@ -12,9 +11,8 @@ import StdlibUnittest
 import SwiftPrivate
 #if _runtime(_ObjC)
 import ObjectiveC
-#endif
-
 import Foundation
+#endif
 
 extension String {
   var bufferID: UInt {
@@ -38,7 +36,7 @@ func checkUnicodeScalarViewIteration(
     expectedScalars: [UInt32], _ str: String
 ) {
   do {
-    var us = str.unicodeScalars
+    let us = str.unicodeScalars
     var i = us.startIndex
     let end = us.endIndex
     var decoded: [UInt32] = []
@@ -50,7 +48,7 @@ func checkUnicodeScalarViewIteration(
     expectEqual(expectedScalars, decoded)
   }
   do {
-    var us = str.unicodeScalars
+    let us = str.unicodeScalars
     let start = us.startIndex
     var i = us.endIndex
     var decoded: [UInt32] = []
@@ -124,8 +122,7 @@ StringTests.test("ForeignIndexes/Valid") {
 
 StringTests.test("ForeignIndexes/UnexpectedCrash")
   .xfail(
-    .Custom({ true },
-    reason: "<rdar://problem/18029290> String.Index caches the grapheme " +
+    .Always("<rdar://problem/18029290> String.Index caches the grapheme " +
       "cluster size, but it is not always correct to use"))
   .code {
 
@@ -244,7 +241,10 @@ StringTests.test("_splitFirst") {
   expectEqual("bar", after)
 }
 
-StringTests.test("hasPrefix") {
+StringTests.test("hasPrefix")
+  .skip(.NativeRuntime("String.hasPrefix undefined without _runtime(_ObjC)"))
+  .code {
+#if _runtime(_ObjC)
   expectFalse("".hasPrefix(""))
   expectFalse("".hasPrefix("a"))
   expectFalse("a".hasPrefix(""))
@@ -256,6 +256,9 @@ StringTests.test("hasPrefix") {
   expectFalse("a\u{0301}bc".hasPrefix("a"))
   expectTrue("\u{00e1}bc".hasPrefix("a\u{0301}"))
   expectTrue("a\u{0301}bc".hasPrefix("\u{00e1}"))
+#else
+  expectUnreachable()
+#endif
 }
 
 StringTests.test("literalConcatenation") {
@@ -609,7 +612,10 @@ func asciiString<
   return s
 }
 
-StringTests.test("stringCoreExtensibility") {
+StringTests.test("stringCoreExtensibility")
+  .skip(.NativeRuntime("Foundation dependency"))
+  .code {
+#if _runtime(_ObjC)
   let ascii = UTF16.CodeUnit(UnicodeScalar("X").value)
   let nonAscii = UTF16.CodeUnit(UnicodeScalar("é").value)
 
@@ -642,9 +648,15 @@ StringTests.test("stringCoreExtensibility") {
       }
     }
   }
+#else
+  expectUnreachable()
+#endif
 }
 
-StringTests.test("stringCoreReserve") {
+StringTests.test("stringCoreReserve")
+  .skip(.NativeRuntime("Foundation dependency"))
+  .code {
+#if _runtime(_ObjC)
   for k in 0...5 {
     var base: String
     var startedNative: Bool
@@ -699,6 +711,9 @@ StringTests.test("stringCoreReserve") {
     }
     expectEqual(expected, base)
   }
+#else
+  expectUnreachable()
+#endif
 }
 
 func makeStringCore(base: String) -> _StringCore {
@@ -814,11 +829,11 @@ StringTests.test("toInt") {
   }
 
   testConvertabilityOfStringWithModification(Int.min) {
-    $0[2]++; ()  // underflow by lots
+    $0[2] += 1; ()  // underflow by lots
   }
 
   testConvertabilityOfStringWithModification(Int.max) {
-    $0[1]++; ()  // overflow by lots
+    $0[1] += 1; ()  // overflow by lots
   }
 
   // Test values lower than min.
@@ -895,12 +910,22 @@ StringTests.test("Conversions") {
 
 // Check the internal functions are correct for ASCII values
 StringTests.test(
-  "forall x: Int8, y: Int8 . x < 128 ==> x <ascii y == x <unicode y") {
+  "forall x: Int8, y: Int8 . x < 128 ==> x <ascii y == x <unicode y")
+  .skip(.NativeRuntime("String._compareASCII undefined without _runtime(_ObjC)"))
+  .code {
+#if _runtime(_ObjC)
   let asciiDomain = (0..<128).map({ String(UnicodeScalar($0)) })
   expectEqualMethodsForDomain(
     asciiDomain, asciiDomain, 
     String._compareDeterministicUnicodeCollation, String._compareASCII)
+#else
+  expectUnreachable()
+#endif
 }
+
+#if os(Linux)
+import Glibc
+#endif
 
 StringTests.test("lowercaseString") {
   // Use setlocale so tolower() is correct on ASCII.
@@ -1038,7 +1063,10 @@ StringTests.test("unicodeViews") {
 
 // Validate that index conversion does something useful for Cocoa
 // programmers.
-StringTests.test("indexConversion") {
+StringTests.test("indexConversion")
+  .skip(.NativeRuntime("Foundation dependency"))
+  .code {
+#if _runtime(_ObjC)
   let re : NSRegularExpression
   do {
     re = try NSRegularExpression(
@@ -1061,6 +1089,9 @@ StringTests.test("indexConversion") {
   }
 
   expectEqual(["furth", "lard", "bart"], matches)
+#else
+  expectUnreachable()
+#endif
 }
 
 StringTests.test("String.append(_: UnicodeScalar)") {

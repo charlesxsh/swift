@@ -77,10 +77,9 @@ namespace {
       return getFixedBufferAlignment(IGM);
     }
 
-    /*
-    friend bool operator==(ExistentialLayout a, ExistentialLayout b) {
-      return a.NumTables == b.NumTables;
-    }*/
+    // friend bool operator==(ExistentialLayout a, ExistentialLayout b) {
+    //   return a.NumTables == b.NumTables;
+    // }
 
     /// Given the address of an existential object, drill down to the
     /// buffer.
@@ -102,8 +101,7 @@ namespace {
     /// Given the address of an existential object, load its witness table.
     llvm::Value *loadWitnessTable(IRGenFunction &IGF, Address addr,
                                   unsigned which) const {
-      return IGF.Builder.CreateLoad(projectWitnessTable(IGF, addr, which),
-                                    "witness-table");
+      return IGF.Builder.CreateLoad(projectWitnessTable(IGF, addr, which));
     }
 
     /// Given the address of an existential object, drill down to the
@@ -115,8 +113,7 @@ namespace {
     /// Given the address of an existential object, load its metadata
     /// object.
     llvm::Value *loadMetadataRef(IRGenFunction &IGF, Address addr) {
-      return IGF.Builder.CreateLoad(projectMetadataRef(IGF, addr),
-                               addr.getAddress()->getName() + ".metadata");
+      return IGF.Builder.CreateLoad(projectMetadataRef(IGF, addr));
     }
   };
 }
@@ -153,10 +150,6 @@ class ExistentialTypeInfoBase : public Base {
   }
 
 protected:
-  const ExistentialTypeInfoBase<Derived, Base> &asExistentialTI() const {
-    return *this;
-  }
-
   const Derived &asDerived() const {
     return *static_cast<const Derived*>(this);
   }
@@ -337,7 +330,8 @@ public:
     Address srcBuffer = layout.projectExistentialBuffer(IGF, src);
     Address destBuffer = layout.projectExistentialBuffer(IGF, dest);
     emitInitializeBufferWithCopyOfBufferCall(IGF, metadata,
-                                             destBuffer, srcBuffer);
+                                             destBuffer,
+                                             srcBuffer);
   }
 
   void initializeWithTake(IRGenFunction &IGF,
@@ -352,7 +346,8 @@ public:
     Address srcBuffer = layout.projectExistentialBuffer(IGF, src);
     Address destBuffer = layout.projectExistentialBuffer(IGF, dest);
     emitInitializeBufferWithTakeOfBufferCall(IGF, metadata,
-                                             destBuffer, srcBuffer);
+                                             destBuffer,
+                                             srcBuffer);
   }
 
   void destroy(IRGenFunction &IGF, Address addr, SILType T) const {
@@ -1527,7 +1522,9 @@ static llvm::Constant *getAssignExistentialsFunction(IRGenModule &IGM,
         emitProjectBufferCall(IGF, destMetadata, destBuffer);
       llvm::Value *srcObject =
         emitProjectBufferCall(IGF, destMetadata, srcBuffer);
-      emitAssignWithCopyCall(IGF, destMetadata, destObject, srcObject);
+      emitAssignWithCopyCall(IGF, destMetadata,
+                             Address(destObject, Alignment(1)),
+                             Address(srcObject, Alignment(1)));
       IGF.Builder.CreateBr(doneBB);
     }
 
@@ -1562,7 +1559,8 @@ static llvm::Constant *getAssignExistentialsFunction(IRGenModule &IGM,
       // witness table from the source metadata if we can't use a
       // protocol witness table.
       emitInitializeBufferWithCopyOfBufferCall(IGF, srcMetadata,
-                                               destBuffer, srcBuffer);
+                                               destBuffer,
+                                               srcBuffer);
       IGF.Builder.CreateBr(doneBB);
     }
 
@@ -1613,12 +1611,11 @@ static bool _isErrorType(SILType baseTy) {
 }
 #endif
 
-/// Project the address of the value inside a boxed existential container,
-/// and open an archetype to its contained type.
-Address irgen::emitBoxedExistentialProjection(IRGenFunction &IGF,
+/// Project the address of the value inside a boxed existential container.
+ContainedAddress irgen::emitBoxedExistentialProjection(IRGenFunction &IGF,
                                               Explosion &base,
                                               SILType baseTy,
-                                              CanArchetypeType openedArchetype){
+                                              CanType projectedType) {
   // TODO: Non-ErrorType boxed existentials.
   assert(_isErrorType(baseTy));
   
@@ -1636,11 +1633,24 @@ Address irgen::emitBoxedExistentialProjection(IRGenFunction &IGF,
                          scratch.getAddress(),
                          out.getAddress()});
   // Load the 'out' values.
-  auto &openedTI = IGF.getTypeInfoForLowered(openedArchetype);
+  auto &projectedTI = IGF.getTypeInfoForLowered(projectedType);
   auto projectedPtrAddr = IGF.Builder.CreateStructGEP(out, 0, Size(0));
-  auto projectedPtr = IGF.Builder.CreateLoad(projectedPtrAddr);
-  auto projected = openedTI.getAddressForPointer(projectedPtr);
-  
+  llvm::Value *projectedPtr = IGF.Builder.CreateLoad(projectedPtrAddr);
+  projectedPtr = IGF.Builder.CreateBitCast(projectedPtr,
+                               projectedTI.getStorageType()->getPointerTo());
+  auto projected = projectedTI.getAddressForPointer(projectedPtr);
+  return ContainedAddress(out, projected);
+}
+
+/// Project the address of the value inside a boxed existential container,
+/// and open an archetype to its contained type.
+Address irgen::emitOpenExistentialBox(IRGenFunction &IGF,
+                                      Explosion &base,
+                                      SILType baseTy,
+                                      CanArchetypeType openedArchetype) {
+  ContainedAddress box = emitBoxedExistentialProjection(IGF, base, baseTy,
+                                                        openedArchetype);
+  Address out = box.getContainer();
   auto metadataAddr = IGF.Builder.CreateStructGEP(out, 1,
                                                   IGF.IGM.getPointerSize());
   auto metadata = IGF.Builder.CreateLoad(metadataAddr);
@@ -1649,24 +1659,19 @@ Address irgen::emitBoxedExistentialProjection(IRGenFunction &IGF,
   auto witness = IGF.Builder.CreateLoad(witnessAddr);
   
   IGF.bindArchetype(openedArchetype, metadata, witness);
-  
-  return projected;
+  return box.getAddress();
 }
 
 /// Allocate a boxed existential container with uninitialized space to hold a
 /// value of a given type.
-Address irgen::emitBoxedExistentialContainerAllocation(IRGenFunction &IGF,
-                                  Explosion &dest,
+OwnedAddress irgen::emitBoxedExistentialContainerAllocation(IRGenFunction &IGF,
                                   SILType destType,
                                   CanType formalSrcType,
-                                  SILType loweredSrcType,
                                 ArrayRef<ProtocolConformanceRef> conformances) {
   // TODO: Non-ErrorType boxed existentials.
   assert(_isErrorType(destType));
 
   auto &destTI = IGF.getTypeInfo(destType).as<ErrorExistentialTypeInfo>();
-  auto &srcTI = IGF.getTypeInfo(loweredSrcType);
-  
   auto srcMetadata = IGF.emitTypeMetadataRef(formalSrcType);
   // Should only be one conformance, for the ErrorType protocol.
   assert(conformances.size() == 1 && destTI.getStoredProtocols().size() == 1);
@@ -1686,11 +1691,13 @@ Address irgen::emitBoxedExistentialContainerAllocation(IRGenFunction &IGF,
   // Extract the box and value address from the result.
   auto box = IGF.Builder.CreateExtractValue(result, 0);
   auto addr = IGF.Builder.CreateExtractValue(result, 1);
-  dest.add(box);
-  
+
+  auto archetype = ArchetypeType::getOpened(destType.getSwiftRValueType());
+  auto &srcTI = IGF.getTypeInfoForUnlowered(AbstractionPattern(archetype),
+                                            formalSrcType);
   addr = IGF.Builder.CreateBitCast(addr,
                                    srcTI.getStorageType()->getPointerTo());
-  return srcTI.getAddressForPointer(addr);
+  return OwnedAddress(srcTI.getAddressForPointer(addr), box);
 }
 
 /// Deallocate a boxed existential container with uninitialized space to hold a
@@ -1851,7 +1858,8 @@ void irgen::emitMetatypeOfOpaqueExistential(IRGenFunction &IGF, Address addr,
 
   // Project the buffer and apply the 'typeof' value witness.
   Address buffer = existLayout.projectExistentialBuffer(IGF, addr);
-  llvm::Value *object = emitProjectBufferCall(IGF, metadata, buffer);
+  llvm::Value *object =
+    emitProjectBufferCall(IGF, metadata, buffer);
   llvm::Value *dynamicType =
     IGF.Builder.CreateCall(IGF.IGM.getGetDynamicTypeFn(),
                            {object, metadata});
@@ -1987,7 +1995,8 @@ irgen::emitIndirectExistentialProjectionWithMetadata(IRGenFunction &IGF,
 
     llvm::Value *metadata = layout.loadMetadataRef(IGF, base);
     Address buffer = layout.projectExistentialBuffer(IGF, base);
-    llvm::Value *object = emitProjectBufferCall(IGF, metadata, buffer);
+    llvm::Value *object =
+      emitProjectBufferCall(IGF, metadata, buffer);
 
     // If we are projecting into an opened archetype, capture the
     // witness tables.
